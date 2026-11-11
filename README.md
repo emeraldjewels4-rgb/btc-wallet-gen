@@ -476,6 +476,22 @@ Every script exits non-zero on failure and ends with a `... TESTS PASSED` or
 used: the suites start loopback servers and use temporary state files, and read
 only their own fixtures rather than the live audit log.
 
+## Verifying before a push
+
+`hooks/pre-push` runs `npm run verify:tree -- --strict`, so a push cannot leave
+this machine from a dirty tree or from a commit that fails the suite. Note the
+`--`: without it npm treats `--strict` as its own flag and the verifier runs
+without it. Enable the hook once per clone:
+
+```sh
+chmod +x hooks/pre-push
+git config core.hooksPath hooks
+```
+
+Bypass a single push with `git push --no-verify`. Expect several minutes: the
+check clones the repository, installs from the committed lockfile and runs the
+full suite inside the clone.
+
 ## Handling the secret
 
 - The seed phrase *is* the wallet: anyone who reads it can spend the funds.

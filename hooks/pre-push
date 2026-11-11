@@ -1,0 +1,31 @@
+#!/bin/sh
+# Verify HEAD before it leaves this machine.
+#
+# Enabled once per clone with:  git config core.hooksPath hooks
+# Bypass a single push with:    git push --no-verify
+#
+# --strict makes the verifier refuse when the working tree has uncommitted or
+# untracked files, so a push cannot be checked against a tree that differs from
+# the commit being sent. The check clones the repository and runs the full suite
+# inside the clone, so expect several minutes.
+set -u
+
+root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+cd "$root" || exit 0
+
+printf '%s\n' "[pre-push] verifying HEAD with: npm run verify:tree -- --strict"
+printf '%s\n' "[pre-push] this clones the repository and runs the full suite there"
+
+# The argument separator matters: without it npm swallows --strict and the
+# verifier runs without it.
+npm run --silent verify:tree -- --strict
+status=$?
+
+if [ "$status" -eq 0 ]; then
+  printf '%s\n' "[pre-push] verification passed"
+  exit 0
+fi
+
+printf '%s\n' "[pre-push] verification failed (exit $status); push aborted" >&2
+printf '%s\n' "[pre-push] fix the failure, or bypass once with: git push --no-verify" >&2
+exit 1
