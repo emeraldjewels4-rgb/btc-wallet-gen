@@ -1,0 +1,38 @@
+{
+  "name": "btc-wallet-gen",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Generate a fresh self-custody Bitcoin wallet locally (BIP-39 seed, BIP-84 native SegWit addresses).",
+  "bin": {
+    "btc-wallet-gen": "./wallet.mjs"
+  },
+  "scripts": {
+    "test": "npm run test:notify && npm run test:summary && npm run test:weekly && npm run test:monthly && npm run test:wallet && npm run rehearse && npm run rehearse:btc",
+    "generate": "node wallet.mjs",
+    "refill": "node refill.mjs",
+    "refill:btc": "node btc-refill.mjs",
+    "rehearse": "node test/refill-rehearsal.mjs",
+    "rehearse:btc": "node test/btc-refill-rehearsal.mjs",
+    "summary": "node treasury-summary.mjs",
+    "weekly": "node treasury-weekly.mjs",
+    "monthly": "node treasury-monthly.mjs",
+    "test:notify": "node test/notify-test.mjs",
+    "test:summary": "node test/summary-test.mjs",
+    "test:weekly": "node test/weekly-test.mjs",
+    "test:monthly": "node test/monthly-test.mjs",
+    "test:wallet": "node test/wallet-test.mjs"
+  },
+  "dependencies": {
+    "@scure/bip32": "^2.4.0",
+    "bip39": "^3.1.2",
+    "bitcoinjs-lib": "^7.0.5",
+    "ecpair": "^3.0.2",
+    "tiny-secp256k1": "^2.2.5",
+    "viem": "^2.57.17",
+    "wif": "^5.0.0"
+  },
+  "devDependencies": {
+    "ganache": "^7.9.2"
+  }
+}
