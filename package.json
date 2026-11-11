@@ -29,7 +29,8 @@
     "upload": "node upload.mjs",
     "test:upload": "node test/upload-test.mjs",
     "publish": "node publish-status.mjs",
-    "test:publish": "node test/publish-status-test.mjs"
+    "test:publish": "node test/publish-status-test.mjs",
+    "verify:tree": "node verify-tree.mjs"
   },
   "dependencies": {
     "@scure/bip32": "^2.4.0",
