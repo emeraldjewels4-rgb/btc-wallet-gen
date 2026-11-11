@@ -171,6 +171,122 @@ RBF or CPFP, and each run handles one target address.
 regtest-style network: real PSBT signing, an independent signature check by the
 fake node, UTXO chaining through change, and cap/budget/insufficiency refusals.
 
+## Send calldata on Sepolia (testnet only)
+
+`sepolia-call.mjs` sends one transaction carrying an arbitrary `0x` payload to a
+target on Sepolia (chain 11155111). It refuses every other chain, so it can only
+spend testnet funds.
+
+```sh
+node --env-file=.env sepolia-call.mjs --to 0xCONTRACT --data 0xdeadbeef \
+  --value 0.001 --max-per-refill 0.01 --total-budget 0.05
+```
+
+Dry run by default; `--live` requires both caps. Rails enforced before signing:
+
+- RPC must report chain 11155111, otherwise the run is refused (exit 3)
+- `--max-per-refill` caps value + worst-case gas for the transaction
+- `--total-budget` caps value + recorded fees already spent on Sepolia, read from
+  `sepolia-call-audit.jsonl` (separate from the refill audit, so the weekly and
+  monthly reports never count contract calls as refills)
+- calldata must be whole bytes and at most 8192 bytes; the zero address and the
+  treasury's own address are refused
+- gas is estimated with the payload; if that fails, pass a reviewed `--gas-limit`
+- the payload is audited as a keccak256 hash plus byte length, never raw bytes,
+  and the confirmed line records the gas fee from the receipt
+- the key comes from `TREASURY_PRIVATE_KEY` and is never printed or audited
+
+`npm run test:sepolia-call` drives it against a local Ganache node pinned to
+chain 11155111: dry run, both caps, the wrong-chain refusal, calldata limits, and
+a real signed transaction whose calldata is verified on chain.
+
+## Publish a treasury status page
+
+`status-page.mjs` writes one self-contained HTML file - the only thing in this
+project that is meant for a public web host. It reads the refill audit log and,
+if you name wallets, their public balances, and publishes a static snapshot:
+balances, all-time spend against your budget, refills in the last 24 hours, and
+the eight most recent transactions.
+
+```sh
+node status-page.mjs --evm 1:0xTREASURY --btc mainnet:bc1q... \
+  --budget-eth 0.05 --budget-btc 0.001 --out site/index.html
+```
+
+- no keys are read: balances come from public endpoints, the rest from
+  `refill-audit.jsonl`
+- the page is static - no JavaScript, no external assets, no RPC calls from the
+  browser; re-run the script and re-upload to refresh it
+- before writing, the HTML is scanned for a private key, WIF, xpub, PEM block or
+  Slack webhook URL, and every 32-byte hex value must be a transaction id that is
+  already in the audit log; anything else exits 3 and writes nothing
+- `site/` is git-ignored, so a snapshot is never committed by accident
+- the page carries `noindex, nofollow` so search engines leave it alone
+
+Upload only the generated `site/index.html`. Never upload `.env`, the audit log,
+the wallet bundle or `.git`. On x10hosting, open cPanel -> File Manager, enter
+`public_html`, and upload `index.html` (or use the FTP account from the panel);
+the page is then served at your account's subdomain. Fetch it once in a browser
+to confirm it renders before sharing the URL.
+
+`npm run test:status` drives the exporter against a fake RPC, a fake mempool API
+and a temp audit log, including the refusal cases.
+
+### Upload it over SFTP
+
+`upload.mjs` sends that one file to the host. Host, username and password come
+from `.env.upload` (git-ignored, copied from `.env.upload.example`); nothing is
+passed on the command line and the password is never printed.
+
+```sh
+cp .env.upload.example .env.upload   # then fill in SFTP_HOST / USER / PASSWORD
+node upload.mjs                      # dry run: connects, reports, uploads nothing
+node upload.mjs --live               # uploads site/index.html
+```
+
+- dry run is the default; it connects, stats the remote directory, and prints
+the local size and sha256 plus whether the remote file would be created or
+overwritten
+- exactly one file is ever transferred, always `site/index.html`, and only if it
+looks like the generated page - no `<script>`, valid HTML, at most 1 MiB
+- `--remote-dir` must stay relative (no `..`, no absolute paths) and must
+already exist; the uploader will not create directories
+- a size mismatch after the write is an error, not a silent success
+- `--verify URL` fetches the page back over HTTP after a live upload and fails
+  unless it answers 200, serves `text/html`, is byte-for-byte the uploaded size,
+  and carries the same `<title>`; a stale cached copy is retried once with a
+  cache-busting query before it counts as a failure
+- `SFTP_PUBLIC_URL` in `.env.upload` sets that URL once, so the weekly publish
+  verifies itself without passing a flag
+- the password is scrubbed from every message, including connection errors
+
+Exit codes: 0 ok, 1 usage or config error, 2 connection or upload failure,
+3 refused.
+
+`npm run test:upload` runs an in-process SFTP server and checks the whole path:
+config parsing, dry run writing nothing, a real upload whose bytes match, the
+authentication failure, and the path refusals.
+
+### Refresh and re-upload after the weekly roll-up
+
+`publish-status.mjs` regenerates the page and hands it to `upload.mjs`, so the
+published snapshot follows the weekly report instead of drifting. `run-weekly.cmd`
+calls it with `--live` after the roll-up, so Monday's task also refreshes the page:
+
+- balances come from the public addresses in `summary-wallets.txt`, the same list
+  the daily summary uses; with no addresses the page still refreshes with
+  activity only
+- publishing is opt-in: with no `.env.upload` the page is refreshed locally,
+  nothing is uploaded, and the task still exits 0
+- a publish failure after a successful roll-up turns the task red, so a broken
+  SFTP login is noticed rather than silently serving a stale page
+- `node publish-status.mjs` on its own is a dry run: page regenerated locally,
+  upload only reports what it would send
+
+`npm run test:publish` checks the orchestration: the refreshed page, the clean
+skip without an upload config, the malformed and rejected wallet lines, and an
+upload that cannot connect.
+
 ## Slack alerts
 
 Both refill tools post to a Slack incoming webhook when a safety rule refuses a
@@ -347,6 +463,7 @@ The chain is:
 - `npm run test:weekly` - ISO-week roll-up: totals, fees, trend, largest refill, skip and guard
 - `npm run test:monthly` - calendar-month and YTD roll-ups, fees, skip and guard
 - `npm run test:wallet` - BIP-39/84 derivation, xpub/tpub watch-only, key refusals
+- `npm run test:sepolia-call` - Sepolia calldata sender: dry run, caps, wrong-chain refusal, live send
 - `npm run rehearse` - EVM refill on a local Ganache chain with fake funds
 - `npm run rehearse:btc` - PSBT signing, independent signature check and refusals on a regtest-style network
 

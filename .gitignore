@@ -1,6 +1,9 @@
 # Treasury key and local state - never commit these.
 .env
 refill-audit.jsonl
+sepolia-call-audit.jsonl
+site/
+.env.upload
 .treasury-summary-state.json
 .treasury-summary-skip-day.txt
 .treasury-weekly-state.json
