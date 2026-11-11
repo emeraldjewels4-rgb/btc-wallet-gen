@@ -1,0 +1,12 @@
+# Treasury key and local state - never commit these.
+.env
+refill-audit.jsonl
+.treasury-summary-state.json
+.treasury-summary-skip-day.txt
+.treasury-weekly-state.json
+.treasury-monthly-state.json
+summary-wallets.txt
+treasury-weekly.log
+treasury-monthly.log
+treasury-summary.log
+node_modules/
