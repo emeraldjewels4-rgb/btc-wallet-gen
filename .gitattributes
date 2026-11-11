@@ -1,0 +1,12 @@
+# Normalize text on commit; keep batch files CRLF so cmd.exe parses them.
+* text=auto
+
+*.mjs text eol=lf
+*.js text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.sh text eol=lf
+*.ps1 text eol=lf
+*.yml text eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf
