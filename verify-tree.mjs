@@ -40,24 +40,27 @@ Clones HEAD into a temporary directory, runs "npm ci" against the committed
 lockfile, then runs "npm test" there.
 
 Options:
+  --strict                 refuse to run when the working tree has changes
   --keep                   keep the clone instead of deleting it
   -h, --help               show this help
 
 Nothing in the working tree is used: uncommitted edits, ignored files and
 node_modules are all absent from the clone.
 
-Exit codes: 0 ok, 1 usage error, 2 the clone could not be created, or the code
-of the failing step (npm ci or npm test).`);
+Exit codes: 0 ok, 1 usage error, 2 the clone could not be created, 3 refused by
+--strict, or the code of the failing step (npm ci or npm test).`);
 }
 
 function parseArgs(argv) {
-  const opts = { keep: false };
+  const opts = { keep: false, strict: false };
   for (const arg of argv) {
     if (arg === '-h' || arg === '--help') {
       usage();
       process.exit(0);
     } else if (arg === '--keep') {
       opts.keep = true;
+    } else if (arg === '--strict') {
+      opts.strict = true;
     } else {
       fail(`unknown argument "${arg}" (try --help)`);
     }
@@ -106,6 +109,14 @@ function main() {
   const npm = npmRunner();
 
   const dirty = git(ROOT, ['status', '--porcelain', '--untracked-files=all']).trim();
+  if (dirty && opts.strict) {
+    const count = dirty.split('\n').filter(Boolean).length;
+    fail(
+      `the working tree has ${count} uncommitted change${count === 1 ? '' : 's'}; ` +
+        'commit or stash them, or run without --strict to verify HEAD anyway',
+      3,
+    );
+  }
   if (dirty) {
     log('note: the working tree has changes; only HEAD is being verified');
   }

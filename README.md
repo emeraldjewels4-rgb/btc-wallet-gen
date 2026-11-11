@@ -468,7 +468,8 @@ The chain is:
 - `npm run rehearse:btc` - PSBT signing, independent signature check and refusals on a regtest-style network
 - `npm run verify:tree` - clone HEAD into a temp directory, `npm ci` from the committed
   lockfile and run the whole suite there, so ignored files and uncommitted edits cannot
-  influence the result; `--keep` leaves the checkout behind
+  influence the result; `--strict` refuses to run on a dirty tree and `--keep` leaves the
+  checkout behind
 
 Every script exits non-zero on failure and ends with a `... TESTS PASSED` or
 `... REHEARSAL PASSED` banner. No real network, funds, webhook or `.env` secret is
