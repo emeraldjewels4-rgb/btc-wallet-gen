@@ -191,6 +191,9 @@ Dry run by default; `--live` requires both caps. Rails enforced before signing:
   monthly reports never count contract calls as refills)
 - calldata must be whole bytes and at most 8192 bytes; the zero address and the
   treasury's own address are refused
+- `--data-file PATH` reads the payload from a file instead of the command line,
+  for hosts that refuse to spawn a process whose arguments carry a long hex
+  string; the same format and size limits apply
 - gas is estimated with the payload; if that fails, pass a reviewed `--gas-limit`
 - the payload is audited as a keccak256 hash plus byte length, never raw bytes,
   and the confirmed line records the gas fee from the receipt

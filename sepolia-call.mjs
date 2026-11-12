@@ -77,6 +77,9 @@ Sends one calldata transaction on Sepolia (chain ${CHAIN_ID}) only.
 Required:
   --to 0xADDRESS        target contract or account
   --data 0xHEX          calldata, whole bytes, 1..${MAX_DATA_BYTES} bytes
+  --data-file PATH      read the calldata from a file instead (same limits);
+                        pass this rather than --data for large payloads, which
+                        some hosts refuse to put on a command line
 
 Options:
   --value ETH           native value to send with the call (default 0)
@@ -128,6 +131,7 @@ function parseArgs(argv) {
   const opts = {
     to: null,
     data: null,
+    dataFile: null,
     valueRaw: process.env.CALL_VALUE_ETH ?? null,
     maxPerRefillRaw: process.env.MAX_REFILL_ETH ?? null,
     totalBudgetRaw: process.env.TOTAL_BUDGET_ETH ?? null,
@@ -156,6 +160,8 @@ function parseArgs(argv) {
       opts.to = next();
     } else if (arg === '--data') {
       opts.data = next();
+    } else if (arg === '--data-file') {
+      opts.dataFile = next();
     } else if (arg === '--value') {
       opts.valueRaw = next();
     } else if (arg === '--max-per-refill') {
@@ -422,13 +428,21 @@ async function main() {
   if (!isAddress(opts.to)) fail(`--to must be a 0x EVM address (got "${opts.to}")`);
   const to = getAddress(opts.to);
 
-  if (!opts.data) fail('--data is required (0x-prefixed calldata)');
-  const data = opts.data.trim();
-  if (!/^0x[0-9a-fA-F]+$/.test(data)) fail('--data must be 0x-prefixed hex with at least one byte');
-  if (data.length % 2 !== 0) fail('--data must contain whole bytes (an even number of hex digits)');
+  if (opts.data && opts.dataFile) fail('pass either --data or --data-file, not both');
+  if (!opts.data && !opts.dataFile) fail('--data is required (0x-prefixed calldata)');
+  let data;
+  if (opts.dataFile) {
+    if (!existsSync(opts.dataFile)) fail(`--data-file ${opts.dataFile} does not exist`);
+    data = readFileSync(opts.dataFile, 'utf8').trim();
+    if (!data) fail(`--data-file ${opts.dataFile} is empty`);
+  } else {
+    data = opts.data.trim();
+  }
+  if (!/^0x[0-9a-fA-F]+$/.test(data)) fail('calldata must be 0x-prefixed hex with at least one byte');
+  if (data.length % 2 !== 0) fail('calldata must contain whole bytes (an even number of hex digits)');
   const dataBytes = (data.length - 2) / 2;
   if (dataBytes > MAX_DATA_BYTES) {
-    fail(`--data is ${dataBytes} bytes; the limit is ${MAX_DATA_BYTES} bytes`);
+    fail(`calldata is ${dataBytes} bytes; the limit is ${MAX_DATA_BYTES} bytes`);
   }
 
   const value = parseEtherArg('--value', opts.valueRaw, { allowZero: true }) ?? 0n;

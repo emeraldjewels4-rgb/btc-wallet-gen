@@ -26,6 +26,11 @@ const RPC = `http://127.0.0.1:${PORT}`;
 const AUDIT = join(tmpdir(), 'sepolia-call-test-audit.jsonl');
 const DATA = `0xdeadbeef${'11'.repeat(32)}`;
 const DATA_BYTES = 36;
+// The oversized payload goes through a file. Handing 16KB of hex to a spawn as
+// an argument makes some hosts refuse the process outright (spawn EPERM), which
+// would fail the suite for a reason that has nothing to do with the size limit
+// being tested.
+const OVERSIZED = join(tmpdir(), 'sepolia-call-test-oversized.hex');
 
 const chain = defineChain({
   id: CHAIN_ID,
@@ -131,9 +136,21 @@ try {
   check('odd-length calldata rejected (exit 1)', run.code === 1, `exit ${run.code}`);
   check('error explains whole bytes', /whole bytes/.test(run.out), run.out.trim());
 
-  run = await runCall(['--to', target, '--data', `0x${'11'.repeat(8193)}`, '--rpc', RPC, '--audit', AUDIT], key);
+  writeFileSync(OVERSIZED, `0x${'11'.repeat(8193)}\n`);
+  run = await runCall(['--to', target, '--data-file', OVERSIZED, '--rpc', RPC, '--audit', AUDIT], key);
   check('oversized calldata rejected (exit 1)', run.code === 1, `exit ${run.code}`);
   check('error states the 8192-byte limit', /limit is 8192 bytes/.test(run.out), run.out.trim());
+
+  run = await runCall(['--to', target, '--data', DATA, '--data-file', OVERSIZED, '--rpc', RPC, '--audit', AUDIT], key);
+  check('--data with --data-file rejected (exit 1)', run.code === 1, `exit ${run.code}`);
+  check('error asks for one payload source', /either --data or --data-file/.test(run.out), run.out.trim());
+
+  run = await runCall(
+    ['--to', target, '--data-file', join(tmpdir(), 'sepolia-call-test-absent.hex'), '--rpc', RPC, '--audit', AUDIT],
+    key,
+  );
+  check('missing --data-file rejected (exit 1)', run.code === 1, `exit ${run.code}`);
+  check('error names the absent file', /does not exist/.test(run.out), run.out.trim());
 
   run = await runCall([...base, '--chain', '1'], key);
   check('--chain is refused', run.code === 1 && /only/.test(run.out), `exit ${run.code}`);
@@ -250,4 +267,5 @@ try {
   await slack?.close();
   if (stub) await new Promise((resolve) => stub.close(resolve));
   rmSync(AUDIT, { force: true });
+  rmSync(OVERSIZED, { force: true });
 }
