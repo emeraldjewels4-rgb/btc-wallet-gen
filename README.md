@@ -14,6 +14,8 @@ npm install
 
 Requires Node 18 or newer.
 
+Released under the [MIT License](LICENSE).
+
 ## Generate a new wallet
 
 ```sh
