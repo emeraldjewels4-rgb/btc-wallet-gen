@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "description": "Generate a fresh self-custody Bitcoin wallet locally (BIP-39 seed, BIP-84 native SegWit addresses).",
+  "license": "MIT",
   "bin": {
     "btc-wallet-gen": "./wallet.mjs"
   },
