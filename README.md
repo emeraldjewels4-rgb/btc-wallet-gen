@@ -121,11 +121,16 @@ Rails enforced before anything is signed:
   `refill-audit.jsonl` would push the chain past its budget
 - refuses when the treasury cannot cover value + worst-case gas
 - refuses `--to` equal to the zero address or the treasury itself
+- takes a run lock, `<audit>.lock` (by default `refill-audit.jsonl.lock`), so a
+  scheduled run and a manual run cannot overlap on the same treasury; the run
+  that arrives second exits 4 before it touches the network
+- audit lines are appended under a short mutex and fsynced, so two processes
+  cannot interleave half of an entry
 - the key comes from `TREASURY_PRIVATE_KEY` and is never printed, logged or
   audited; RPC URLs (which often carry API keys) are logged by host only
 
 Exit codes: 0 ok/no action, 1 usage or config error, 2 runtime error, 3 refused
-by a safety rule.
+by a safety rule, 4 another run holds the lock.
 
 Limits worth knowing:
 
@@ -164,6 +169,8 @@ Rails enforced before anything is signed:
 - every input signature is verified locally, against the treasury's P2WPKH
   script, before the transaction is broadcast
 - change below 546 sats is left to miners instead of creating a dust output
+- takes the same run lock as the EVM tool, `<audit>.lock`, so the two cannot
+  overlap on one audit log; the run that arrives second exits 4
 
 Fee is a static P2WPKH model (68 vB/input, 31 vB/output); the plan prints the
 fee and approximate size, so check it before going live on mainnet. There is no
@@ -199,6 +206,8 @@ Dry run by default; `--live` requires both caps. Rails enforced before signing:
 - gas is estimated with the payload; if that fails, pass a reviewed `--gas-limit`
 - the payload is audited as a keccak256 hash plus byte length, never raw bytes,
   and the confirmed line records the gas fee from the receipt
+- takes the same run lock as the other tools (`<audit>.lock`); a second run
+  exits 4
 - the key comes from `TREASURY_PRIVATE_KEY` and is never printed or audited
 
 `npm run test:sepolia-call` drives it against a local Ganache node pinned to

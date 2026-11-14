@@ -2,6 +2,8 @@
 .env
 refill-audit.jsonl
 sepolia-call-audit.jsonl
+*.jsonl.lock
+*.jsonl.append-lock
 site/
 .env.upload
 .treasury-summary-state.json

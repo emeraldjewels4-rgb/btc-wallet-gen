@@ -22,9 +22,10 @@
  *   --watch 300 to poll. See --help.
  */
 
-import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { createSlackNotifier, resolveSlackWebhooks } from './notify.mjs';
+import { appendAuditLine, takeRunLock } from './run-lock.mjs';
 import {
   createPublicClient,
   createWalletClient,
@@ -101,7 +102,8 @@ Options:
   --rpc URL             RPC endpoint (default: the chain's public RPC)
   --min-treasury ETH    Slack alert when the treasury drops below this floor
   --alert-cooldown SEC  seconds between identical alerts (default 900)
-  --audit PATH          audit log path (default ${AUDIT_DEFAULT})
+  --audit PATH          audit log path (default ${AUDIT_DEFAULT}); a lock at
+                        PATH.lock keeps a second run from overlapping this one
   --watch SECONDS       poll every SECONDS instead of running once
   --live                actually sign and broadcast (otherwise dry run)
   -h, --help            show this help
@@ -120,7 +122,7 @@ Environment:
   RPC_URL               default for --rpc
 
 Exit codes: 0 ok/no action, 1 usage or config error, 2 runtime error,
-            3 refused by a safety rule.`);
+            3 refused by a safety rule, 4 another run holds the lock.`);
 }
 
 function parseEtherArg(name, raw, { allowZero = false } = {}) {
@@ -231,8 +233,10 @@ function readSpent(auditPath, chainId) {
 }
 
 // Never contains secrets: no key, and no RPC URL (it may carry an API key).
+// run-lock.mjs writes the line under a mutex and fsyncs it, so two processes
+// cannot interleave halves of an entry.
 function appendAudit(auditPath, entry) {
-  appendFileSync(auditPath, `${JSON.stringify(entry)}\n`);
+  appendAuditLine(auditPath, entry, { log });
 }
 
 function parseCooldown(raw) {
@@ -491,6 +495,10 @@ async function main() {
   if (totalBudget !== null && amount > totalBudget) {
     fail(`--amount ${formatEther(amount)} ETH is already above --total-budget ${formatEther(totalBudget)} ETH`);
   }
+
+  // One run per audit log at a time: a scheduled run and a manual run on the
+  // same treasury would otherwise race for the same nonce. Released on exit.
+  takeRunLock(opts.audit, { tool: 'refill.mjs', log });
 
   const minTreasury = parseEtherArg('--min-treasury', opts.minTreasuryRaw);
   const notifier = createSlackNotifier({

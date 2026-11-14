@@ -9,7 +9,7 @@
     "btc-wallet-gen": "./wallet.mjs"
   },
   "scripts": {
-    "test": "npm run test:notify && npm run test:summary && npm run test:weekly && npm run test:monthly && npm run test:wallet && npm run test:sepolia-call && npm run test:status && npm run test:upload && npm run test:publish && npm run rehearse && npm run rehearse:btc",
+    "test": "npm run test:notify && npm run test:lock && npm run test:audit && npm run test:summary && npm run test:weekly && npm run test:monthly && npm run test:wallet && npm run test:sepolia-call && npm run test:status && npm run test:upload && npm run test:publish && npm run rehearse && npm run rehearse:btc",
     "generate": "node wallet.mjs",
     "refill": "node refill.mjs",
     "refill:btc": "node btc-refill.mjs",
@@ -20,6 +20,8 @@
     "weekly": "node treasury-weekly.mjs",
     "monthly": "node treasury-monthly.mjs",
     "test:notify": "node test/notify-test.mjs",
+    "test:lock": "node test/lock-test.mjs",
+    "test:audit": "node test/audit-append-test.mjs",
     "test:summary": "node test/summary-test.mjs",
     "test:weekly": "node test/weekly-test.mjs",
     "test:monthly": "node test/monthly-test.mjs",

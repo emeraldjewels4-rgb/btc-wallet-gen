@@ -25,8 +25,9 @@
  *   add --live to send. See --help.
  */
 
-import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { createSlackNotifier, resolveSlackWebhooks } from './notify.mjs';
+import { appendAuditLine, takeRunLock } from './run-lock.mjs';
 import {
   createPublicClient,
   createWalletClient,
@@ -87,7 +88,8 @@ Options:
   --total-budget ETH    cap on value + fees already spent on Sepolia (required with --live)
   --gas-limit N         use this gas limit instead of estimating
   --rpc URL             Sepolia RPC endpoint (default: the chain's public RPC)
-  --audit PATH          audit log (default ${AUDIT_DEFAULT})
+  --audit PATH          audit log (default ${AUDIT_DEFAULT}); a lock at PATH.lock
+                        keeps a second run from overlapping this one
   --alert-cooldown SEC  seconds between identical alerts (default 900)
   --live                sign and broadcast (otherwise dry run)
   -h, --help            show this help
@@ -103,7 +105,7 @@ Environment:
   SLACK_*_WEBHOOK_FILE  read that webhook URL from a file instead
 
 Exit codes: 0 ok/no action, 1 usage or config error, 2 runtime error,
-            3 refused by a safety rule.`);
+            3 refused by a safety rule, 4 another run holds the lock.`);
 }
 
 function parseEtherArg(name, raw, { allowZero = false } = {}) {
@@ -216,8 +218,10 @@ function readSpent(auditPath) {
 }
 
 // Never contains secrets: no key, no RPC URL, and only a hash of the payload.
+// Written under a mutex and fsynced by run-lock.mjs, so two processes cannot
+// interleave halves of an entry.
 function appendAudit(auditPath, entry) {
-  appendFileSync(auditPath, `${JSON.stringify(entry)}\n`);
+  appendAuditLine(auditPath, entry, { log });
 }
 
 async function refuse(ctx, key, reason, figures = null) {
@@ -481,6 +485,10 @@ async function main() {
       '--live needs explicit caps: pass --max-per-refill and --total-budget (or set MAX_REFILL_ETH and TOTAL_BUDGET_ETH)',
     );
   }
+
+  // One run per audit log at a time, shared with the other signing tools.
+  // Released on exit.
+  takeRunLock(opts.audit, { tool: 'sepolia-call.mjs', log });
 
   const notifier = createSlackNotifier({
     ...resolveSlackWebhooks(),

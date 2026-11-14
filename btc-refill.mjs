@@ -23,13 +23,14 @@
  *   add --live to broadcast. See --help.
  */
 
-import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
 import * as bitcoin from 'bitcoinjs-lib';
 import * as ecc from 'tiny-secp256k1';
 import { ECPairFactory } from 'ecpair';
 import { decode as decodeWif } from 'wif';
 import { createSlackNotifier, resolveSlackWebhooks } from './notify.mjs';
+import { appendAuditLine, takeRunLock } from './run-lock.mjs';
 
 const ECPair = ECPairFactory(ecc);
 
@@ -84,7 +85,8 @@ Options:
   --api URL             mempool.space-compatible endpoint (required for regtest)
   --min-treasury BTC    Slack alert when the treasury drops below this floor
   --alert-cooldown SEC  seconds between identical alerts (default 900)
-  --audit PATH          audit log path (default ${AUDIT_DEFAULT})
+  --audit PATH          audit log path (default ${AUDIT_DEFAULT}); a lock at
+                        PATH.lock keeps a second run from overlapping this one
   --watch SECONDS       poll every SECONDS instead of running once
   --live                actually sign and broadcast (otherwise dry run)
   -h, --help            show this help
@@ -104,7 +106,7 @@ Environment:
                         SLACK_WEBHOOK_FILE=/path/to/webhook
 
 Exit codes: 0 ok/no action, 1 usage or config error, 2 runtime error,
-            3 refused by a safety rule.`);
+            3 refused by a safety rule, 4 another run holds the lock.`);
 }
 
 function parseBtcArg(name, raw, { allowZero = false } = {}) {
@@ -478,8 +480,10 @@ async function tick(ctx) {
   return 'sent';
 }
 
+// Written under a mutex and fsynced by run-lock.mjs, so two processes cannot
+// interleave halves of an entry.
 function appendAudit(auditPath, entry) {
-  appendFileSync(auditPath, `${JSON.stringify(entry)}\n`);
+  appendAuditLine(auditPath, entry, { log });
 }
 
 async function main() {
@@ -565,6 +569,10 @@ async function main() {
   if (totalBudget !== null && amount > totalBudget) {
     fail(`--amount ${satsToBtc(amount)} BTC is already above --total-budget ${satsToBtc(totalBudget)} BTC`);
   }
+
+  // One run per audit log at a time, shared with the EVM tools: a scheduled run
+  // and a manual run would otherwise race for the same UTXO set. Released on exit.
+  takeRunLock(opts.audit, { tool: 'btc-refill.mjs', log });
 
   const notifier = createSlackNotifier({
     ...resolveSlackWebhooks(),
