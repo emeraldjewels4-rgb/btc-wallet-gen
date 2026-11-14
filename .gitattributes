@@ -1,14 +1,12 @@
-# Normalize text on commit; keep batch files CRLF so cmd.exe parses them.
+# Normalize text on commit. Pin the EOL only where the platform default would
+# break something: sh scripts and node shebangs must be LF, cmd.exe needs CRLF,
+# and the licence is canonical MIT text that should read the same everywhere.
 * text=auto
 
 *.mjs text eol=lf
-*.js text eol=lf
-*.json text eol=lf
-*.md text eol=lf
-LICENSE text eol=lf
 *.sh text eol=lf
 hooks/* text eol=lf
-*.ps1 text eol=lf
-*.yml text eol=lf
+LICENSE text eol=lf
+
 *.cmd text eol=crlf
 *.bat text eol=crlf
