@@ -24,6 +24,9 @@ const PORT = 8548;
 const CHAIN_ID = 11155111;
 const RPC = `http://127.0.0.1:${PORT}`;
 const AUDIT = join(tmpdir(), 'sepolia-call-test-audit.jsonl');
+// The spend anchor beside the log: reset it whenever the log is reset, or the
+// next run is refused for contradicting a ledger this test cleared on purpose.
+const ANCHOR = `${AUDIT}.state.json`;
 const DATA = `0xdeadbeef${'11'.repeat(32)}`;
 const DATA_BYTES = 36;
 // The oversized payload goes through a file. Handing 16KB of hex to a spawn as
@@ -87,6 +90,7 @@ const server = ganache.server({
 
 try {
   rmSync(AUDIT, { force: true });
+  rmSync(ANCHOR, { force: true });
 
   try {
     await server.listen(PORT);
@@ -220,6 +224,7 @@ try {
 
   console.log('\n== live send ==');
   rmSync(AUDIT, { force: true });
+  rmSync(ANCHOR, { force: true });
   run = await runCall(['--live', ...capped], key);
   check('live send exits 0', run.code === 0, `exit ${run.code}: ${run.out.trim()}`);
   check('live send confirmed on chain', /confirmed in block \d+/.test(run.out), run.out.trim());
@@ -267,5 +272,6 @@ try {
   await slack?.close();
   if (stub) await new Promise((resolve) => stub.close(resolve));
   rmSync(AUDIT, { force: true });
+  rmSync(ANCHOR, { force: true });
   rmSync(OVERSIZED, { force: true });
 }

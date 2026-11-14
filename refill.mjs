@@ -24,10 +24,11 @@
  *   --watch 300 to poll. See --help.
  */
 
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { createSlackNotifier, resolveSlackWebhooks } from './notify.mjs';
 import { appendAuditLine, takeRunLock } from './run-lock.mjs';
+import { checkAnchor } from './spend-anchor.mjs';
 import {
   createPublicClient,
   createWalletClient,
@@ -61,8 +62,6 @@ const CHAINS = new Map([
 ]);
 
 const AUDIT_DEFAULT = 'refill-audit.jsonl';
-// Sits next to the audit log: refill-audit.jsonl.state.json.
-const STATE_SUFFIX = '.state.json';
 const EXIT_REFUSED = 3;
 
 // Human names for the safety rules, used in refusal alerts and logs.
@@ -238,29 +237,6 @@ function readSpent(auditPath, chainId) {
   return total;
 }
 
-// The audit log is the ledger, but a missing log reads as zero spent: delete
-// that one file and the whole budget comes back. The anchor records the highest
-// total seen per chain, so the log may grow but cannot shrink unnoticed.
-// Returns chain id -> wei. Throws with a readable reason when the file is not
-// usable, so a corrupt anchor and a missing log are refused the same way.
-function readAnchor(path) {
-  if (!existsSync(path)) return {};
-  const parsed = JSON.parse(readFileSync(path, 'utf8'));
-  if (parsed === null || typeof parsed !== 'object' || parsed.chains === null || typeof parsed.chains !== 'object') {
-    throw new Error('it is not a spend anchor');
-  }
-  return Object.fromEntries(Object.entries(parsed.chains).map(([id, wei]) => [id, BigInt(wei)]));
-}
-
-// Written small and atomically, so a half-written anchor can never be mistaken
-// for a smaller spend total.
-function writeAnchor(path, chains) {
-  const tmp = `${path}.tmp`;
-  const body = { chains: Object.fromEntries(Object.entries(chains).map(([id, wei]) => [id, wei.toString()])) };
-  writeFileSync(tmp, `${JSON.stringify(body, null, 2)}\n`);
-  renameSync(tmp, path);
-}
-
 // Never contains secrets: no key, and no RPC URL (it may carry an API key).
 // run-lock.mjs writes the line under a mutex and fsyncs it, so two processes
 // cannot interleave halves of an entry.
@@ -320,40 +296,15 @@ async function tick(ctx) {
   // spent, so this is what stops a deleted or truncated log from handing the
   // budget back. It runs on every pass, including dry runs and idle polls.
   const spent = readSpent(auditPath, chain.id);
-  const anchorPath = `${auditPath}${STATE_SUFFIX}`;
-  let chains;
-  try {
-    chains = readAnchor(anchorPath);
-  } catch (err) {
-    return refuse(
-      ctx,
-      'audit-mismatch',
-      `the budget anchor ${anchorPath} cannot be used (${describe(err)}) - ` +
-        `restore it, or delete it to re-anchor from ${auditPath}`,
-      `anchor ${anchorPath} | log ${auditPath}`,
-    );
-  }
-
-  const anchored = chains[String(chain.id)] ?? null;
-  if (anchored !== null && anchored > spent) {
-    return refuse(
-      ctx,
-      'audit-mismatch',
-      `the budget anchor ${anchorPath} records ${formatEther(anchored)} ETH spent on ` +
-        `${chain.name}, but ${auditPath} accounts for only ${formatEther(spent)} ETH - a ` +
-        'deleted, truncated or replaced log does not hand the budget back',
-      `anchor ${formatEther(anchored)} ETH | log ${formatEther(spent)} ETH | ` +
-        `missing ${formatEther(anchored - spent)} ETH`,
-    );
-  }
-  if (anchored === null || anchored < spent) {
-    chains[String(chain.id)] = spent;
-    try {
-      writeAnchor(anchorPath, chains);
-    } catch (err) {
-      throw new Error(`could not write the budget anchor ${anchorPath}: ${describe(err)}`);
-    }
-  }
+  const verdict = checkAnchor({
+    auditPath,
+    chainKey: chain.id,
+    spent,
+    label: chain.name,
+    unit: 'ETH',
+    format: formatEther,
+  });
+  if (verdict.status !== 'ok') return refuse(ctx, 'audit-mismatch', verdict.reason, verdict.figures);
 
   const targetBalance = await publicClient.getBalance({ address: to });
   log(`${chain.name}: target ${to} holds ${formatEther(targetBalance)} ETH, threshold ${formatEther(threshold)} ETH`);

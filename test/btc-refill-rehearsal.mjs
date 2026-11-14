@@ -29,6 +29,11 @@ const NETWORK = bitcoin.networks.regtest;
 const FEE_RATE = 5;
 const AUDIT = join(tmpdir(), 'btc-refill-rehearsal-audit.jsonl');
 const DRY_AUDIT = join(tmpdir(), 'btc-refill-rehearsal-dry.jsonl');
+// The spend anchor beside each log. The rehearsal resets the ledger, so a
+// leftover anchor from an earlier run must go too - otherwise the run is
+// refused for contradicting a log that was deliberately reset.
+const ANCHOR = `${AUDIT}.state.json`;
+const DRY_ANCHOR = `${DRY_AUDIT}.state.json`;
 const AMOUNT = 50000n; // 0.0005 BTC
 const DUST = 546n;
 
@@ -197,6 +202,8 @@ function runRefill(args) {
 try {
   rmSync(AUDIT, { force: true });
   rmSync(DRY_AUDIT, { force: true });
+  rmSync(ANCHOR, { force: true });
+  rmSync(DRY_ANCHOR, { force: true });
 
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address();
@@ -359,4 +366,6 @@ try {
   await warningSlack?.close();
   rmSync(AUDIT, { force: true });
   rmSync(DRY_AUDIT, { force: true });
+  rmSync(ANCHOR, { force: true });
+  rmSync(DRY_ANCHOR, { force: true });
 }

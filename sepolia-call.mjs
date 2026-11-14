@@ -18,6 +18,8 @@
  *   - the key comes from TREASURY_PRIVATE_KEY and is never printed, logged, or
  *     written to the audit file.
  *   - the payload is audited as keccak256 hash + byte length, never stored raw.
+ *   - refuses when the audit log contradicts the spend anchor beside it, so a
+ *     deleted or truncated log cannot hand the budget back.
  *
  * Usage:
  *   node --env-file=.env sepolia-call.mjs --to 0xTARGET --data 0xdeadbeef \
@@ -28,6 +30,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { createSlackNotifier, resolveSlackWebhooks } from './notify.mjs';
 import { appendAuditLine, takeRunLock } from './run-lock.mjs';
+import { checkAnchor } from './spend-anchor.mjs';
 import {
   createPublicClient,
   createWalletClient,
@@ -55,6 +58,7 @@ const RULE_LABELS = {
   budget: 'total spend budget',
   gas: 'gas estimation',
   'treasury-low': 'treasury balance',
+  'audit-mismatch': 'spend anchor vs audit log',
 };
 
 function fail(message, code = 1) {
@@ -89,7 +93,8 @@ Options:
   --gas-limit N         use this gas limit instead of estimating
   --rpc URL             Sepolia RPC endpoint (default: the chain's public RPC)
   --audit PATH          audit log (default ${AUDIT_DEFAULT}); a lock at PATH.lock
-                        keeps a second run from overlapping this one
+                        keeps a second run from overlapping this one, and
+                        PATH.state.json anchors the spend total
   --alert-cooldown SEC  seconds between identical alerts (default 900)
   --live                sign and broadcast (otherwise dry run)
   -h, --help            show this help
@@ -262,6 +267,19 @@ async function tick(ctx) {
     rpcLabel,
   } = ctx;
 
+  // Same ledger guard as the refill tools: an audit log that shrank, or one
+  // that is gone entirely, must not hand the budget back.
+  const spent = readSpent(auditPath);
+  const verdict = checkAnchor({
+    auditPath,
+    chainKey: CHAIN_ID,
+    spent,
+    label: CHAIN_NAME,
+    unit: 'ETH',
+    format: formatEther,
+  });
+  if (verdict.status !== 'ok') return refuse(ctx, 'audit-mismatch', verdict.reason, verdict.figures);
+
   let nodeChainId;
   try {
     nodeChainId = await publicClient.getChainId();
@@ -303,7 +321,6 @@ async function tick(ctx) {
 
   const gasCost = gas * maxFeePerGas;
   const maxCost = value + gasCost;
-  const spent = readSpent(auditPath);
 
   if (maxPerRefill !== null && maxCost > maxPerRefill) {
     return refuse(

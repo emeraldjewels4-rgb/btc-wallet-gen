@@ -176,6 +176,8 @@ Rails enforced before anything is signed:
 - change below 546 sats is left to miners instead of creating a dust output
 - takes the same run lock as the EVM tool, `<audit>.lock`, so the two cannot
   overlap on one audit log; the run that arrives second exits 4
+- keeps the same spend anchor beside its log (`<audit>.state.json`), so a
+  deleted or truncated log is refused instead of being read as zero spent
 
 Fee is a static P2WPKH model (68 vB/input, 31 vB/output); the plan prints the
 fee and approximate size, so check it before going live on mainnet. There is no
@@ -213,6 +215,8 @@ Dry run by default; `--live` requires both caps. Rails enforced before signing:
   and the confirmed line records the gas fee from the receipt
 - takes the same run lock as the other tools (`<audit>.lock`); a second run
   exits 4
+- keeps the same spend anchor beside its log, so a deleted or truncated log is
+  refused instead of being read as zero spent
 - the key comes from `TREASURY_PRIVATE_KEY` and is never printed or audited
 
 `npm run test:sepolia-call` drives it against a local Ganache node pinned to

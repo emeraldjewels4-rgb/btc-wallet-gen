@@ -14,6 +14,8 @@
  *     uncompressed WIF, or a send to the treasury itself.
  *   - Every signature is verified locally against the input script before the
  *     transaction is broadcast.
+ *   - Refuses when the audit log contradicts the spend anchor beside it, so a
+ *     deleted or truncated log cannot hand the budget back.
  *   - The WIF is read from BTC_TREASURY_WIF and is never printed, logged or
  *     written to the audit file.
  *
@@ -31,6 +33,7 @@ import { ECPairFactory } from 'ecpair';
 import { decode as decodeWif } from 'wif';
 import { createSlackNotifier, resolveSlackWebhooks } from './notify.mjs';
 import { appendAuditLine, takeRunLock } from './run-lock.mjs';
+import { checkAnchor } from './spend-anchor.mjs';
 
 const ECPair = ECPairFactory(ecc);
 
@@ -49,6 +52,7 @@ const RULE_LABELS = {
   cap: 'per-refill cap',
   budget: 'total spend budget',
   'treasury-low': 'confirmed treasury balance',
+  'audit-mismatch': 'spend anchor vs audit log',
 };
 
 function fail(message, code = 1) {
@@ -86,7 +90,8 @@ Options:
   --min-treasury BTC    Slack alert when the treasury drops below this floor
   --alert-cooldown SEC  seconds between identical alerts (default 900)
   --audit PATH          audit log path (default ${AUDIT_DEFAULT}); a lock at
-                        PATH.lock keeps a second run from overlapping this one
+                        PATH.lock keeps a second run from overlapping this one,
+                        and PATH.state.json anchors the spend total
   --watch SECONDS       poll every SECONDS instead of running once
   --live                actually sign and broadcast (otherwise dry run)
   -h, --help            show this help
@@ -341,6 +346,19 @@ async function refuse(ctx, key, reason, figures = null) {
 async function tick(ctx) {
   const { api, to, amount, threshold, maxPerRefill, totalBudget, feeRate, dryRun, auditPath, networkName, treasury, network, minTreasury, notifier } = ctx;
 
+  // Same ledger guard as the EVM tool: an audit log that shrank, or one that is
+  // gone entirely, must not hand the budget back.
+  const spent = readSpent(auditPath, networkName);
+  const verdict = checkAnchor({
+    auditPath,
+    chainKey: networkName,
+    spent,
+    label: networkName,
+    unit: 'BTC',
+    format: satsToBtc,
+  });
+  if (verdict.status !== 'ok') return refuse(ctx, 'audit-mismatch', verdict.reason, verdict.figures);
+
   const targetUtxos = await getJson(`${api}/address/${to}/utxo`);
   const targetBalance = targetUtxos
     .filter((utxo) => utxo.status?.confirmed)
@@ -363,7 +381,6 @@ async function tick(ctx) {
     );
   }
 
-  const spent = totalBudget === null ? null : readSpent(auditPath, networkName);
   if (totalBudget !== null && spent + amount > totalBudget) {
     const remaining = spent < totalBudget ? totalBudget - spent : 0n;
     return refuse(
