@@ -38,7 +38,7 @@ function fail(message) {
 }
 
 function usage() {
-  console.log(`Usage: node wallet.mjs [--restore] [--count N] [--show-key]
+  console.log(`Usage: node wallet.mjs [--restore] [--count N] [--show-key] [--phrase-only]
 
   --restore     derive addresses from an existing seed phrase read from stdin
                 (pipe it in: node wallet.mjs --restore < seed.txt)
@@ -47,13 +47,16 @@ function usage() {
                 or its receive chain m/84'/COIN'/0'/0)
   --count N     number of receive addresses to print (1-20, default 1)
   --show-key    also print the WIF private key for address #0
+  --phrase-only print only the new seed phrase on stdout, one line and nothing
+                else, so 'node wallet.mjs --phrase-only > seed.txt' is a backup
+                that --restore accepts; generation only, never with --show-key
   -h, --help    show this help
 
 BIP-39 passphrase: set BIP39_PASSPHRASE in the environment.`);
 }
 
 function parseArgs(argv) {
-  const opts = { count: 1, showKey: false, restore: false, xpub: null };
+  const opts = { count: 1, showKey: false, restore: false, phraseOnly: false, xpub: null };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '-h' || arg === '--help') {
@@ -63,6 +66,8 @@ function parseArgs(argv) {
       opts.showKey = true;
     } else if (arg === '--restore') {
       opts.restore = true;
+    } else if (arg === '--phrase-only') {
+      opts.phraseOnly = true;
     } else if (arg === '--xpub') {
       const value = argv[i + 1];
       if (value === undefined || value.startsWith('--')) fail('--xpub needs an extended public key');
@@ -81,6 +86,9 @@ function parseArgs(argv) {
   }
   if (opts.xpub !== null && opts.restore) fail('--xpub and --restore are mutually exclusive');
   if (opts.xpub !== null && opts.showKey) fail('--show-key needs a seed; an xpub has no private key');
+  if (opts.phraseOnly && (opts.restore || opts.xpub !== null || opts.showKey)) {
+    fail('--phrase-only writes a new seed phrase and nothing else, so it cannot be combined with --restore, --xpub or --show-key');
+  }
 
   return opts;
 }
@@ -183,6 +191,19 @@ async function main() {
     }
   } else {
     mnemonic = generateMnemonic(256);
+  }
+
+  // The full report below is not a backup: --restore wants a phrase, not prose,
+  // so a redirected report cannot be restored. This mode writes the 24 words
+  // and nothing else, which makes `> seed.txt` a file --restore accepts.
+  if (opts.phraseOnly) {
+    if (passphrase) {
+      process.stderr.write(
+        'note: BIP39_PASSPHRASE is set, so this phrase alone restores a different wallet\n',
+      );
+    }
+    process.stdout.write(`${mnemonic}\n`);
+    return;
   }
 
   const receive = receiveNode(mnemonic, passphrase);

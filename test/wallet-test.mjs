@@ -14,7 +14,7 @@ import { spawn } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HDKey } from '@scure/bip32';
-import { mnemonicToSeedSync } from 'bip39';
+import { mnemonicToSeedSync, validateMnemonic } from 'bip39';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -53,14 +53,15 @@ function check(label, condition, detail = '') {
 function runWallet(args, input = '') {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, ['wallet.mjs', ...args], { cwd: ROOT });
-    let out = '';
+    let stdout = '';
+    let stderr = '';
     child.stdout.on('data', (chunk) => {
-      out += chunk;
+      stdout += chunk;
     });
     child.stderr.on('data', (chunk) => {
-      out += chunk;
+      stderr += chunk;
     });
-    child.on('close', (code) => resolve({ code, out }));
+    child.on('close', (code) => resolve({ code, stdout, stderr, out: stdout + stderr }));
     child.stdin.end(input);
   });
 }
@@ -121,6 +122,39 @@ check('count 0 exits 1', run.code === 1, `exit ${run.code}`);
 
 run = await runWallet(['--xpub']);
 check('--xpub without a value exits 1', run.code === 1, `exit ${run.code}`);
+
+console.log('\n== phrase-only backup ==');
+const gen = await runWallet(['--phrase-only']);
+check('--phrase-only exits 0', gen.code === 0, `exit ${gen.code}: ${gen.stderr}`);
+check(
+  'stdout is exactly one line of 24 words',
+  /^([a-z]+ ){23}[a-z]+\n$/.test(gen.stdout),
+  JSON.stringify(gen.stdout),
+);
+check('stdout carries none of the report', !/address|Receive|Account|wallet/i.test(gen.stdout), gen.stdout);
+const generated = gen.stdout.trim();
+check('the phrase is a valid BIP-39 mnemonic', validateMnemonic(generated), `${generated.split(' ').length} words`);
+
+// The whole point: the redirected file is a backup --restore accepts.
+const roundTrip = await runWallet(['--restore'], gen.stdout);
+check('the printed phrase restores from the same bytes', roundTrip.code === 0, `exit ${roundTrip.code}: ${roundTrip.out}`);
+check('restore recognises all 24 words', /Restored from a 24-word BIP-39 seed phrase/.test(roundTrip.out), roundTrip.out);
+check('restore prints the expected address #0', /#0\s+m\/84'\/0'\/0'\/0\/0\s+bc1q[0-9a-z]{38}/.test(roundTrip.out), roundTrip.out);
+
+const again = await runWallet(['--restore'], generated);
+check('restoring twice gives the same wallet', again.stdout === roundTrip.stdout, again.stdout.trim().slice(0, 60));
+
+console.log('\n== phrase-only refusals ==');
+run = await runWallet(['--phrase-only', '--restore'], VECTOR);
+check('--phrase-only with --restore exits 1', run.code === 1, `exit ${run.code}`);
+check('the refusal explains the conflict', /cannot be combined/.test(run.out), run.out.trim());
+
+run = await runWallet(['--phrase-only', '--show-key']);
+check('--phrase-only with --show-key exits 1', run.code === 1, `exit ${run.code}`);
+check('the refusal prints no phrase', run.stdout === '', JSON.stringify(run.stdout));
+
+run = await runWallet(['--phrase-only', '--xpub', accountXpub]);
+check('--phrase-only with --xpub exits 1', run.code === 1, `exit ${run.code}`);
 
 if (failures > 0) {
   console.error(`\nWALLET TESTS FAILED: ${failures} check(s) failed`);

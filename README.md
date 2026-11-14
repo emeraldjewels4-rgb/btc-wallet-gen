@@ -25,11 +25,15 @@ node wallet.mjs --show-key     # also print the WIF private key for address #0
 ```
 
 The seed phrase is printed to stdout once and never stored. To keep it out of
-your scrollback, redirect into encrypted storage you control:
+your scrollback, redirect into encrypted storage you control. Redirecting the
+plain report gives you a file `--restore` will not accept, so use
+`--phrase-only`, which writes the 24 words and nothing else:
 
 ```sh
-node wallet.mjs > /path/to/encrypted-volume/seed.txt
+node wallet.mjs --phrase-only > /path/to/encrypted-volume/seed.txt
 ```
+
+That file restores directly with `node wallet.mjs --restore < seed.txt`.
 
 ## Restore an existing seed phrase
 
@@ -72,6 +76,7 @@ printed receive-chain xpub (`m/84'/0'/0'/0`) — against your existing wallet.
 | `--xpub XPUB` | derive from an account (`m/84'/COIN'/0'`) or receive-chain xpub, using `xpub` (mainnet) or `tpub` (testnet), no secret needed |
 | `--count N` | how many receive addresses to print, 1-20 (default 1) |
 | `--show-key` | also print the WIF private key for address #0 |
+| `--phrase-only` | print only the new seed phrase on stdout, so a redirect is a restorable backup; generation only, and never with `--show-key` |
 | `-h`, `--help` | usage |
 
 Environment: `BIP39_PASSPHRASE` (default empty).
