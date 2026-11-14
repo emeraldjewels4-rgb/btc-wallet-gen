@@ -369,7 +369,7 @@ function recentTable(rows) {
   </table></div>`;
 }
 
-function buildHtml({ title, generatedAt, balances, evmSpend, btcSpend, evmBudget, btcBudget, windowEntries, recent }) {
+function buildHtml({ title, generatedAt, generatedIso, balances, evmSpend, btcSpend, evmBudget, btcBudget, windowEntries, recent }) {
   const evm = evmSpend.map((bucket) => bucket);
   const btc = btcSpend.map((bucket) => bucket);
   evm.budget = evmBudget;
@@ -475,7 +475,7 @@ function buildHtml({ title, generatedAt, balances, evmSpend, btcSpend, evmBudget
   <header>
     <p class="kicker">read-only snapshot</p>
     <h1>${esc(title)}</h1>
-    <p class="generated">Generated ${esc(generatedAt)} UTC. Static page: refreshed by re-running the exporter, not live.</p>
+    <p class="generated">Generated <time datetime="${esc(generatedIso)}">${esc(generatedAt)} UTC</time>. Static page: refreshed by re-running the exporter, not live.</p>
   </header>
 
   <section>
@@ -568,6 +568,9 @@ async function main() {
   const html = buildHtml({
     title: opts.title,
     generatedAt: new Date(now).toISOString().slice(0, 16).replace('T', ' '),
+    // Machine-readable, so a monitor can tell a stale published page from a
+    // fresh one without parsing the prose around it.
+    generatedIso: new Date(now).toISOString(),
     balances,
     evmSpend: totalBy(entries.filter((entry) => entry.unit === 'ETH'), 'bucketKey', 'ETH'),
     btcSpend: totalBy(entries.filter((entry) => entry.unit === 'BTC'), 'bucketKey', 'BTC'),

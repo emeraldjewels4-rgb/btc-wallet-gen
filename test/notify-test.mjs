@@ -108,6 +108,14 @@ try {
     pathsIn(routedRequests),
   );
   check('no alert is cross-posted', routedRequests.length === 3, pathsIn(routedRequests));
+
+  const beforeStale = received.length;
+  await routed.alert('stale:refill-audit.jsonl', 'no refill activity');
+  check(
+    "the dead-man's switch uses the alert channel",
+    received.length - beforeStale === 1 && received[received.length - 1].path === '/alert',
+    pathsIn(received.slice(beforeStale)),
+  );
   check(
     'describe names all three channels',
     /refusals -> alert channel/.test(routed.describe()) &&

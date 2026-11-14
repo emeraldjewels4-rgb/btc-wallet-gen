@@ -9,6 +9,7 @@
  *
  * Routing is derived from the alert key, so call sites cannot disagree:
  *   refused:*  -> alert channel   (high severity)
+ *   stale:*    -> alert channel   (high severity, dead-man's switch)
  *   low:*      -> warning channel (medium severity)
  *   anything   -> default channel (refill sent, daily summary)
  *
@@ -61,7 +62,7 @@ export function resolveSlackWebhooks(env = process.env) {
 }
 
 function routeFor(key) {
-  if (key.startsWith('refused:')) return 'alert';
+  if (key.startsWith('refused:') || key.startsWith('stale:')) return 'alert';
   if (key.startsWith('low:')) return 'warning';
   return 'default';
 }

@@ -47,11 +47,18 @@ Delete `seed.txt` afterwards.
 
 ### BIP-39 passphrase (optional 25th word)
 
-If the wallet was created with a passphrase, pass it through the environment:
+If the wallet was created with a passphrase, pass it through the environment.
+Read it into the shell without echoing it, so the 25th word never lands on the
+screen or in your shell history:
 
 ```sh
-BIP39_PASSPHRASE='your 25th word' node wallet.mjs --restore < seed.txt
+read -rsp 'passphrase: ' BIP39_PASSPHRASE && export BIP39_PASSPHRASE
+node wallet.mjs --restore < seed.txt
+unset BIP39_PASSPHRASE
 ```
+
+An inline `BIP39_PASSPHRASE='...' node wallet.mjs ...` would record the
+passphrase in both, which is the one thing not to do with it.
 
 The passphrase is part of the wallet: a wrong or missing passphrase yields a
 different, empty set of addresses. Confirm by comparing address `#0` — or the
@@ -102,7 +109,7 @@ own addresses: it cannot create funds and cannot touch a chain it has no key for
 Dry run by default; `--live` requires both caps:
 
 ```sh
-cp .env.example .env        # paste the treasury key; .env is git-ignored
+cp -n .env.example .env     # -n never overwrites an existing .env; paste the key inside
 node --env-file=.env refill.mjs --to 0xYOURTARGET \
   --threshold 0.001 --amount 0.005 \
   --max-per-refill 0.01 --total-budget 0.05
@@ -310,6 +317,40 @@ calls it with `--live` after the roll-up, so Monday's task also refreshes the pa
 skip without an upload config, the malformed and rejected wallet lines, and an
 upload that cannot connect.
 
+### Notice when the scheduled runs stop
+
+Every other guard here reacts to a run that happens and goes wrong. None of them
+noticed a run that never happened - a sleeping machine, a disabled task, a
+disconnected drive all look exactly like a quiet treasury. `watchdog.mjs` looks
+backwards instead: it reads the newest timestamp in the audit log and complains
+when nothing has been recorded for about 1.5 times the expected interval.
+
+```sh
+node --env-file=.env watchdog.mjs --expected-days 7
+```
+
+- `run-weekly.cmd` runs it after the publish step, so a week and a half with no
+  refill activity turns the task red and posts to the alert channel
+- exit codes: 0 recent activity, 1 usage, 2 runtime, 3 stale - the same code the
+  refill tools use for a safety refusal; 4 stays the run lock
+- the alert reports the newest entry, its age and the interval, and does not
+  invent a cause: the ledger cannot tell "nothing needed doing" from "the
+  schedule stopped"
+- `--audit` is repeatable, unreadable lines are counted and skipped, and a
+  missing log counts as stale rather than as nothing to report
+- nothing is written: this tool only reads the log, so it is safe to run often
+- the page carries `<time datetime="...">` with the full ISO instant, so a
+  monitor can tell a stale published snapshot from a fresh one without parsing
+  prose
+
+A local switch cannot save itself: if the machine is asleep, the weekly task
+that runs it is asleep too. Point an external monitor at the published page, or
+run `watchdog.mjs` from another host, if you need to hear about a machine that
+never wakes.
+
+`npm run test:watchdog` covers the threshold on both sides, the missing log, the
+damaged log, several logs at once, and the alert with and without a webhook.
+
 ## Slack alerts
 
 Both refill tools post to a Slack incoming webhook when a safety rule refuses a
@@ -356,8 +397,9 @@ different channels means different webhook URLs:
 | Treasury below floor | medium, `:warning:` | `SLACK_WARNING_WEBHOOK_URL` |
 | Refill sent, daily summary | info, `:white_check_mark:` / `:bank:` | `SLACK_WEBHOOK_URL` |
 
-Routing follows the alert key (`refused:*` to the alert channel, `low:*` to the
-warning channel, everything else to the default), so no call site can bypass it.
+Routing follows the alert key (`refused:*` and `stale:*` to the alert channel,
+`low:*` to the warning channel, everything else to the default), so no call site
+can bypass it. `stale:*` is the dead-man's switch below.
 An unset dedicated URL falls back to `SLACK_WEBHOOK_URL`; with none of the three
 set, alerting is disabled.
 Each URL can also come from a file: set `SLACK_WEBHOOK_FILE`,

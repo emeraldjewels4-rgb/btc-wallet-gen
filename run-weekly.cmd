@@ -3,6 +3,8 @@ rem Weekly treasury roll-up for Slack, launched by Windows Task Scheduler.
 rem It reads only refill-audit.jsonl, so there is no wallet list to configure.
 rem Afterwards it refreshes site/index.html and uploads it when .env.upload
 rem exists; without that file the refresh is local and the task stays green.
+rem Finally it checks the dead-man's switch, which turns the task red when no
+rem refill has been recorded for about a week and a half.
 rem Usage: run-weekly.cmd [WEBHOOK_FILE]
 rem   WEBHOOK_FILE  optional path to a file holding the Slack webhook URL;
 rem                 when omitted the URL comes from .env as before.
@@ -42,4 +44,13 @@ echo [!STAMP!] refreshing the status page>>treasury-weekly.log
 set "PUBLISH=!ERRORLEVEL!"
 echo [!STAMP!] publish exit code !PUBLISH!>>treasury-weekly.log
 if "!CODE!"=="0" if not "!PUBLISH!"=="0" set "CODE=!PUBLISH!"
+
+rem Dead-man's switch: a week and a half with nothing in the audit log turns this
+rem task red and posts to the alert channel, so a machine that slept through its
+rem runs is not silently quiet. A fresh log keeps the task green.
+echo [!STAMP!] checking for missed runs>>treasury-weekly.log
+"%NODE%" --env-file=.env watchdog.mjs --expected-days 7>>treasury-weekly.log 2>&1
+set "WATCH=!ERRORLEVEL!"
+echo [!STAMP!] watchdog exit code !WATCH!>>treasury-weekly.log
+if "!CODE!"=="0" if not "!WATCH!"=="0" set "CODE=!WATCH!"
 exit /b !CODE!

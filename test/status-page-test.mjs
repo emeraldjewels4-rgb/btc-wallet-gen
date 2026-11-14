@@ -177,6 +177,19 @@ try {
   const body = html.match(/<tbody>([\s\S]*?)<\/tbody>/)?.[1] ?? '';
   check('dedupes submitted and confirmed lines', (body.match(/<tr>/g) ?? []).length === 3, `${(body.match(/<tr>/g) ?? []).length} rows`);
 
+  const stamp = html.match(/<time datetime="([^"]+)">/)?.[1] ?? '';
+  check('stamps a machine-readable generated-at', Number.isFinite(Date.parse(stamp)), stamp);
+  check(
+    'the stamp is the moment the page was written',
+    Math.abs(Date.now() - Date.parse(stamp)) < 60 * 1000,
+    stamp,
+  );
+  check(
+    'the visible time is the same instant',
+    html.includes(`>${new Date(stamp).toISOString().slice(0, 16).replace('T', ' ')} UTC</time>`),
+    stamp,
+  );
+
   check('ships no JavaScript', !/<script/i.test(html));
   check('uses no external assets', !/(src|href)="https?:/i.test(html));
   check('marks the page noindex', html.includes('content="noindex, nofollow"'));
