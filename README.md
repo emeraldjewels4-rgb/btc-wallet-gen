@@ -269,7 +269,7 @@ from `.env.upload` (git-ignored, copied from `.env.upload.example`); nothing is
 passed on the command line and the password is never printed.
 
 ```sh
-cp .env.upload.example .env.upload   # then fill in SFTP_HOST / USER / PASSWORD
+cp -n .env.upload.example .env.upload   # -n never overwrites an existing .env.upload; then fill in SFTP_HOST / USER / PASSWORD
 node upload.mjs                      # dry run: connects, reports, uploads nothing
 node upload.mjs --live               # uploads site/index.html
 ```
