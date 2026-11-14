@@ -210,7 +210,9 @@ try {
   const btcRun = () =>
     runTool(
       'btc-refill.mjs',
-      ['--to', btcAddress, '--amount', '0.0005', '--fee-rate', '5', '--api', UNREACHABLE, '--audit', btcAudit],
+      // No --fee-rate on purpose: the fee API is unreachable too, so a refusal
+      // here also proves the ledger guard runs before the rate is fetched.
+      ['--to', btcAddress, '--amount', '0.0005', '--api', UNREACHABLE, '--audit', btcAudit],
       { BTC_TREASURY_WIF: btcWif },
     );
 

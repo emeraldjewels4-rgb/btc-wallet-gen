@@ -343,8 +343,19 @@ async function refuse(ctx, key, reason, figures = null) {
   return 'refused';
 }
 
+// The half-hour rate from the fee API. Called from tick rather than from main:
+// the ledger guard and the run lock come first, so a missing audit log is still
+// reported (exit 3) when the fee API is unreachable.
+async function fetchFeeRate(api) {
+  const fees = await getJson(`${api}/v1/fees/recommended`);
+  const chosen = fees.halfHourFee ?? fees.fastestFee ?? fees.hourFee;
+  if (!Number.isInteger(chosen) || chosen < 1) throw new Error('fee API returned no usable rate');
+  log(`fee rate ${chosen} sat/vB (half-hour target, from ${new URL(api).host})`);
+  return BigInt(chosen);
+}
+
 async function tick(ctx) {
-  const { api, to, amount, threshold, maxPerRefill, totalBudget, feeRate, dryRun, auditPath, networkName, treasury, network, minTreasury, notifier } = ctx;
+  const { api, to, amount, threshold, maxPerRefill, totalBudget, dryRun, auditPath, networkName, treasury, network, minTreasury, notifier } = ctx;
 
   // Same ledger guard as the EVM tool: an audit log that shrank, or one that is
   // gone entirely, must not hand the budget back.
@@ -358,6 +369,18 @@ async function tick(ctx) {
     format: satsToBtc,
   });
   if (verdict.status !== 'ok') return refuse(ctx, 'audit-mismatch', verdict.reason, verdict.figures);
+
+  // Resolved after the guard, and cached on the context so --watch fetches the
+  // rate once rather than on every poll.
+  let { feeRate } = ctx;
+  if (feeRate === null) {
+    try {
+      feeRate = await fetchFeeRate(api);
+    } catch (err) {
+      throw new Error(`could not fetch a fee rate: ${describe(err)} - pass --fee-rate to set one`);
+    }
+    ctx.feeRate = feeRate;
+  }
 
   const targetUtxos = await getJson(`${api}/address/${to}/utxo`);
   const targetBalance = targetUtxos
@@ -528,18 +551,11 @@ async function main() {
     fail('--api must be an http(s) URL');
   }
 
-  let feeRate;
-  if (opts.feeRateRaw === null) {
-    try {
-      const fees = await getJson(`${api}/v1/fees/recommended`);
-      const chosen = fees.halfHourFee ?? fees.fastestFee ?? fees.hourFee;
-      if (!Number.isInteger(chosen) || chosen < 1) throw new Error('fee API returned no usable rate');
-      feeRate = BigInt(chosen);
-      log(`fee rate ${feeRate} sat/vB (half-hour target, from ${new URL(api).host})`);
-    } catch (err) {
-      fail(`could not fetch a fee rate: ${describe(err)} - pass --fee-rate to set one`, 2);
-    }
-  } else {
+  // Only a pinned rate is settled here. The fetched rate is resolved inside
+  // tick, after the ledger guard and the run lock, so an unreachable fee API
+  // cannot mask a broken audit log.
+  let feeRate = null;
+  if (opts.feeRateRaw !== null) {
     const parsed = Number(opts.feeRateRaw);
     if (!Number.isInteger(parsed) || parsed < 1) fail(`--fee-rate expects a whole number of sat/vB, got "${opts.feeRateRaw}"`);
     feeRate = BigInt(parsed);
