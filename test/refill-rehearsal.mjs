@@ -22,6 +22,11 @@ const PORT = 8547;
 const CHAIN_ID = 31337;
 const AUDIT = join(tmpdir(), 'refill-rehearsal-audit.jsonl');
 const DRY_AUDIT = join(tmpdir(), 'refill-rehearsal-dry.jsonl');
+// The spend anchor beside each log. The rehearsal starts from a clean ledger, so
+// a leftover anchor from an earlier run must go too - otherwise the run is
+// refused for contradicting a log that was deliberately reset.
+const ANCHOR = `${AUDIT}.state.json`;
+const DRY_ANCHOR = `${DRY_AUDIT}.state.json`;
 const TARGET = '0x7f9ab3c4d5e6f708192a3b4c5d6e7f8091a2b3c4';
 const RPC = `http://127.0.0.1:${PORT}`;
 
@@ -82,6 +87,8 @@ const server = ganache.server({
 try {
   rmSync(AUDIT, { force: true });
   rmSync(DRY_AUDIT, { force: true });
+  rmSync(ANCHOR, { force: true });
+  rmSync(DRY_ANCHOR, { force: true });
 
   try {
     await server.listen(PORT);
@@ -252,4 +259,6 @@ try {
   await warningSlack?.close();
   rmSync(AUDIT, { force: true });
   rmSync(DRY_AUDIT, { force: true });
+  rmSync(ANCHOR, { force: true });
+  rmSync(DRY_ANCHOR, { force: true });
 }

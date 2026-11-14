@@ -119,6 +119,9 @@ Rails enforced before anything is signed:
 - `--live` refuses to start without `--max-per-refill` and `--total-budget`
 - refuses when the refill breaks the per-refill cap, or when spend recorded in
   `refill-audit.jsonl` would push the chain past its budget
+- keeps a spend anchor beside the log, `<audit>.state.json`, holding the highest
+  total seen per chain; a log that shrank (deleted, truncated or replaced) is
+  refused with exit 3 instead of being read as zero spent
 - refuses when the treasury cannot cover value + worst-case gas
 - refuses `--to` equal to the zero address or the treasury itself
 - takes a run lock, `<audit>.lock` (by default `refill-audit.jsonl.lock`), so a
@@ -136,8 +139,10 @@ Limits worth knowing:
 
 - EVM chains only (Ethereum, Optimism, Polygon, Base, Arbitrum, Sepolia). A
   Bitcoin refill needs UTXO selection and PSBT signing, which is a separate build.
-- Caps are counted per chain from the local audit log, so deleting that log
-  resets the budget. Keep it.
+- Caps are counted per chain from the local audit log. Deleting that log does
+  not reset the budget any more: the anchor beside it refuses the next run
+  instead. Keep both, and delete the anchor only when the log was rebuilt on
+  purpose.
 - Rehearse on Sepolia with a throwaway key before pointing this at mainnet funds.
 - `npm run rehearse` starts a local Ganache chain with fake funds and drives the
   live send path end to end: five signed transactions, cap and budget refusals,
