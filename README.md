@@ -505,3 +505,28 @@ full suite inside the clone.
 - Generated on a networked desktop means the secret passed through that machine.
   For real balances, generate on an offline machine or a hardware wallet.
 - There is no recovery service. Lose the phrase, lose the coins.
+
+## A note on the GitHub contributor list
+
+The history was rewritten on 12-13 November 2026 (author and committer set to the
+copyright holder, then the `Co-Authored-By: Codebuff` trailers removed) and
+force-pushed. Afterwards the repository sidebar on GitHub kept listing two
+contributors - `emeraldjewels4-rgb` and `codebuff-team` - for hours after the
+trailers were gone.
+
+That second entry is a stale cache on GitHub's side, not a fact about this
+history. Evidence, checked on 2026-11-13:
+
+- `graphs/contributors-data` returns a single contributor,
+  `emeraldjewels4-rgb` (14 commits).
+- Every commit on `master` is authored and committed by the copyright holder in
+  `LICENSE`, and `git log --format=%B master | grep -ci 'co-authored-by'` prints
+  `0`.
+- The sidebar's own fragment, `contributors_list`, still served the old
+  two-person list, and `GET /contributors` reported a stale count of 11 against
+  14 actual commits.
+
+If the sidebar comes up again, compare it with `graphs/contributors-data`: if
+that shows one contributor and the sidebar shows two, the discrepancy is on
+GitHub's side and worth raising with their support quoting the two observations
+above.
