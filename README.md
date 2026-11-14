@@ -515,18 +515,21 @@ contributors - `emeraldjewels4-rgb` and `codebuff-team` - for hours after the
 trailers were gone.
 
 That second entry is a stale cache on GitHub's side, not a fact about this
-history. Evidence, checked on 2026-11-13:
+history. Evidence, rechecked on 2026-11-14, 26 hours after the rewrite:
 
 - `graphs/contributors-data` returns a single contributor,
-  `emeraldjewels4-rgb` (14 commits).
+  `emeraldjewels4-rgb` (16 commits).
 - Every commit on `master` is authored and committed by the copyright holder in
   `LICENSE`, and `git log --format=%B master | grep -ci 'co-authored-by'` prints
   `0`.
-- The sidebar's own fragment, `contributors_list`, still served the old
-  two-person list, and `GET /contributors` reported a stale count of 11 against
-  14 actual commits.
+- `GET /contributors` refreshed while the sidebar did not: it first reported 11
+  contributions, and by 2026-11-14 reported 16, matching the 16 commits on
+  `master`, still for a single contributor.
+- The sidebar's fragment, `contributors_list`, still served a byte-identical
+  1,082-byte response naming `codebuff-team`, exactly as it did 26 hours
+  earlier.
 
 If the sidebar comes up again, compare it with `graphs/contributors-data`: if
 that shows one contributor and the sidebar shows two, the discrepancy is on
-GitHub's side and worth raising with their support quoting the two observations
+GitHub's side and worth raising with their support quoting the observations
 above.
