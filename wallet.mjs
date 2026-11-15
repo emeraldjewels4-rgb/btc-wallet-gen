@@ -31,6 +31,9 @@ import { encode as encodeWIF } from 'wif';
 const NETWORK = bitcoin.networks.bitcoin;
 const COIN = "m/84'/0'/0'"; // BIP-84 account: native SegWit, account 0
 const RECEIVE = 0; // external chain: addresses handed out to payers
+// Same meaning as in the treasury tools: a safety check said no. Used when the
+// restored wallet does not match the value recorded for it.
+const EXIT_MISMATCH = 3;
 
 function fail(message) {
   console.error(`error: ${message}`);
@@ -38,7 +41,7 @@ function fail(message) {
 }
 
 function usage() {
-  console.log(`Usage: node wallet.mjs [--restore] [--count N] [--show-key] [--phrase-only]
+  console.log(`Usage: node wallet.mjs [--restore] [--count N] [--show-key] [--phrase-only] [--expect VALUE]
 
   --restore     derive addresses from an existing seed phrase read from stdin
                 (pipe it in: node wallet.mjs --restore < seed.txt)
@@ -46,17 +49,27 @@ function usage() {
                 (xpub for mainnet, tpub for testnet; account m/84'/COIN'/0'
                 or its receive chain m/84'/COIN'/0'/0)
   --count N     number of receive addresses to print (1-20, default 1)
-  --show-key    also print the WIF private key for address #0
+  --show-key    also print the WIF private key for address #0; to a terminal it
+                refuses unless --allow-tty is passed
+  --allow-tty   print that private key to the terminal anyway
   --phrase-only print only the new seed phrase on stdout, one line and nothing
                 else, so 'node wallet.mjs --phrase-only > seed.txt' is a backup
-                that --restore accepts; generation only, never with --show-key
+                that --restore accepts; generation only, never with --show-key,
+                and it refuses to run when stdout is a terminal
+  --expect VALUE check the restored wallet against an xpub, tpub or address
+                recorded when it was created; a mismatch exits 3, so a wrong
+                phrase or passphrase fails instead of looking like a restore
   -h, --help    show this help
 
-BIP-39 passphrase: set BIP39_PASSPHRASE in the environment.`);
+BIP-39 passphrase: set BIP39_PASSPHRASE in the environment.
+
+Exit codes: 0 ok, 1 usage or config error, 3 the restored wallet does not
+            match --expect (nothing was printed that could be mistaken for
+            success, and no wallet should be funded from it).`);
 }
 
 function parseArgs(argv) {
-  const opts = { count: 1, showKey: false, restore: false, phraseOnly: false, xpub: null };
+  const opts = { count: 1, showKey: false, allowTty: false, restore: false, phraseOnly: false, xpub: null, expect: null };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '-h' || arg === '--help') {
@@ -64,10 +77,22 @@ function parseArgs(argv) {
       process.exit(0);
     } else if (arg === '--show-key' || arg === '--show-private-key') {
       opts.showKey = true;
+    } else if (arg === '--allow-tty') {
+      opts.allowTty = true;
     } else if (arg === '--restore') {
       opts.restore = true;
     } else if (arg === '--phrase-only') {
       opts.phraseOnly = true;
+    } else if (arg === '--expect') {
+      const value = argv[i + 1];
+      if (value === undefined || value.startsWith('--')) fail('--expect needs an xpub, tpub or address');
+      // Only the two things this tool can derive: an extended public key, or a
+      // bech32 address (BIP-84 is bech32-only, so 1.../3... never applies here).
+      if (!/^[xt]pub/.test(value) && !/^(bc1|tb1)/.test(value)) {
+        fail(`--expect expects an xpub, tpub or bech32 address, got "${value}"`);
+      }
+      opts.expect = value;
+      i += 1;
     } else if (arg === '--xpub') {
       const value = argv[i + 1];
       if (value === undefined || value.startsWith('--')) fail('--xpub needs an extended public key');
@@ -86,6 +111,7 @@ function parseArgs(argv) {
   }
   if (opts.xpub !== null && opts.restore) fail('--xpub and --restore are mutually exclusive');
   if (opts.xpub !== null && opts.showKey) fail('--show-key needs a seed; an xpub has no private key');
+  if (opts.expect !== null && !opts.restore) fail('--expect compares a restored wallet, so it needs --restore');
   if (opts.phraseOnly && (opts.restore || opts.xpub !== null || opts.showKey)) {
     fail('--phrase-only writes a new seed phrase and nothing else, so it cannot be combined with --restore, --xpub or --show-key');
   }
@@ -110,9 +136,46 @@ function normalizePhrase(phrase) {
   return phrase.normalize('NFKD').toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
+// Returns both nodes: --expect may be given either the account xpub
+// (m/84'/COIN'/0') or the receive-chain one (m/84'/COIN'/0'/0), and @scure/bip32
+// does not keep a link back to the parent.
 function receiveNode(mnemonic, passphrase) {
   const seed = mnemonicToSeedSync(mnemonic, passphrase);
-  return HDKey.fromMasterSeed(seed).derive(COIN).deriveChild(RECEIVE);
+  const account = HDKey.fromMasterSeed(seed).derive(COIN);
+  return { account, receive: account.deriveChild(RECEIVE) };
+}
+
+// Compares a restored wallet against a value recorded when it was created. The
+// failure this catches is a restore that succeeds and yields the wrong wallet:
+// a mistyped phrase that still passes the checksum, a missing 25th word, or a
+// backup of a different wallet entirely.
+function compareExpectation(expect, { account, receive }, count) {
+  const wanted = expect.trim();
+
+  if (/^[xt]pub/.test(wanted)) {
+    const known = [
+      ['receive-chain xpub', receive.publicExtendedKey],
+      ['account xpub', account.publicExtendedKey],
+    ];
+    const match = known.find(([, value]) => value === wanted);
+    if (match) return { ok: true, what: match[0] };
+    return {
+      ok: false,
+      detail:
+        `  expected     ${wanted}\n` +
+        known.map(([name, value]) => `  restored     ${value} (${name})`).join('\n'),
+    };
+  }
+
+  const addresses = Array.from({ length: count }, (_, index) => receiveAddress(receive, index).address);
+  const index = addresses.indexOf(wanted);
+  if (index !== -1) return { ok: true, what: `address #${index}` };
+  return {
+    ok: false,
+    detail:
+      `  expected     ${wanted}\n` +
+      addresses.map((address, i) => `  restored #${i}  ${address}`).join('\n'),
+  };
 }
 
 // Version bytes tell an xpub (mainnet) from a tpub (testnet); passing them keeps
@@ -163,6 +226,19 @@ async function main() {
   const opts = parseArgs(process.argv.slice(2));
   const passphrase = process.env.BIP39_PASSPHRASE ?? '';
 
+  // Both modes write a secret to stdout, and a terminal keeps it in scrollback -
+  // the exact place these flags exist to keep it out of. A redirect or a pipe is
+  // accepted; --show-key can be pressed past with --allow-tty, but a phrase is
+  // never printed to a terminal.
+  if (process.stdout.isTTY) {
+    if (opts.phraseOnly) {
+      fail('--phrase-only refuses to print the seed phrase to a terminal - redirect it, e.g. node wallet.mjs --phrase-only > seed.txt');
+    }
+    if (opts.showKey && !opts.allowTty) {
+      fail('--show-key would print a private key to this terminal - redirect the output, or pass --allow-tty to print it anyway');
+    }
+  }
+
   if (opts.xpub !== null) {
     const { receive, network, account, kind } = xpubReceiveNode(opts.xpub);
     console.log('Derived from an extended public key - public data only.');
@@ -207,7 +283,7 @@ async function main() {
     mnemonic = generateMnemonic(256);
   }
 
-  const receive = receiveNode(mnemonic, passphrase);
+  const { account, receive } = receiveNode(mnemonic, passphrase);
 
   if (opts.restore) {
     const wordCount = mnemonic.split(' ').length;
@@ -250,6 +326,19 @@ async function main() {
       ? 'Any BIP-84 wallet restored from this phrase and passphrase shows these same addresses.'
       : 'Anyone holding the seed phrase or private key can spend these funds.',
   );
+
+  // Last, so the outcome is the final line a human reads.
+  if (opts.expect !== null) {
+    const verdict = compareExpectation(opts.expect, { account, receive }, opts.count);
+    console.log('');
+    if (verdict.ok) {
+      console.log(`Verified: the restored ${verdict.what} matches --expect.`);
+    } else {
+      console.error(`error: --expect does not match the restored wallet\n${verdict.detail}`);
+      console.error('  the phrase, the passphrase or the recorded value is wrong - do not fund this wallet');
+      process.exitCode = EXIT_MISMATCH;
+    }
+  }
 }
 
 main().catch((err) => fail(err?.message ?? String(err)));

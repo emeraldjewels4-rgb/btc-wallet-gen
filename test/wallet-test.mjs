@@ -50,9 +50,34 @@ function check(label, condition, detail = '') {
   console.log(`  FAIL  ${label}${detail ? ` -> ${detail}` : ''}`);
 }
 
-function runWallet(args, input = '') {
+function runWallet(args, input = '', env = {}) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, ['wallet.mjs', ...args], { cwd: ROOT });
+    const child = spawn(process.execPath, ['wallet.mjs', ...args], { cwd: ROOT, env: { ...process.env, ...env } });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    child.on('close', (code) => resolve({ code, stdout, stderr, out: stdout + stderr }));
+    child.stdin.end(input);
+  });
+}
+
+// Runs the CLI with stdout pretending to be a terminal. A real pty is not
+// available from here, so the child redefines isTTY before importing the tool
+// and supplies argv itself; everything after that is the real code path.
+const WALLET_URL = new URL('../wallet.mjs', import.meta.url).href;
+function runWalletOnTerminal(args, input = '') {
+  const script = [
+    "Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true });",
+    `process.argv = ['node', 'wallet.mjs', ...${JSON.stringify(args)}];`,
+    `await import(${JSON.stringify(WALLET_URL)});`,
+  ].join('\n');
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script], { cwd: ROOT });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (chunk) => {
@@ -148,6 +173,75 @@ check('the refusal prints no phrase', run.stdout === '', JSON.stringify(run.stdo
 
 run = await runWallet(['--phrase-only', '--xpub', accountXpub]);
 check('--phrase-only with --xpub exits 1', run.code === 1, `exit ${run.code}`);
+
+console.log('\n== secrets refuse a terminal ==');
+run = await runWalletOnTerminal(['--phrase-only']);
+check('--phrase-only on a terminal exits 1', run.code === 1, `exit ${run.code}`);
+check('it names the redirect', /redirect it/.test(run.out), run.out.trim());
+check('and no phrase reaches stdout', run.stdout.trim() === '', JSON.stringify(run.stdout));
+
+run = await runWalletOnTerminal(['--restore', '--show-key'], VECTOR);
+check('--show-key on a terminal exits 1', run.code === 1, `exit ${run.code}`);
+check('it offers the override', /--allow-tty/.test(run.out), run.out.trim());
+check('nothing at all was printed first', run.stdout.trim() === '', JSON.stringify(run.stdout));
+
+run = await runWalletOnTerminal(['--restore', '--show-key', '--allow-tty'], VECTOR);
+check('--allow-tty presses past the refusal', run.code === 0, `exit ${run.code}: ${run.out}`);
+check('the private key is then printed', /Private key \(WIF\) for #0/.test(run.stdout), run.stdout);
+
+run = await runWallet(['--restore', '--show-key'], VECTOR);
+check('--show-key into a pipe needs no override', run.code === 0, `exit ${run.code}`);
+check('and prints the key', /Private key \(WIF\) for #0/.test(run.stdout), run.stdout);
+
+console.log('\n== --expect verification ==');
+// Address #2 of the vector, taken from the tool's own listing so the test does
+// not need a second derivation path.
+const listing = await runWallet(['--xpub', receiveXpub, '--count', '3']);
+const vectorAddress2 = (listing.out.match(/#2\s+\S+\s+(\S+)/) ?? [])[1];
+
+run = await runWallet(['--restore', '--expect', accountXpub], VECTOR);
+check('a matching account xpub exits 0', run.code === 0, `exit ${run.code}: ${run.out}`);
+check('and names what matched', /Verified: the restored account xpub matches --expect/.test(run.out), run.out);
+
+run = await runWallet(['--restore', '--expect', receiveXpub], VECTOR);
+check('a matching receive-chain xpub exits 0', run.code === 0, `exit ${run.code}`);
+check('and distinguishes the depth', /Verified: the restored receive-chain xpub/.test(run.out), run.out);
+
+run = await runWallet(['--restore', '--expect', EXPECTED_0], VECTOR);
+check('a matching address #0 exits 0', run.code === 0, `exit ${run.code}`);
+check('and names the index', /Verified: the restored address #0 matches --expect/.test(run.out), run.out);
+
+run = await runWallet(['--restore', '--count', '3', '--expect', vectorAddress2], VECTOR);
+check('an address inside --count matches', run.code === 0, `exit ${run.code}: ${run.out}`);
+check('and is reported by index', /the restored address #2/.test(run.out), run.out);
+
+console.log('\n== --expect catches the wrong wallet ==');
+run = await runWallet(['--restore', '--expect', vectorAddress2], VECTOR);
+check('an address outside --count exits 3', run.code === 3, `exit ${run.code}`);
+check('the mismatch shows both sides', /expected\s+bc1q/.test(run.out) && /restored #0/.test(run.out), run.out);
+
+run = await runWallet(['--restore', '--expect', accountXpub], VECTOR, { BIP39_PASSPHRASE: 'wrong' });
+check('right phrase, wrong passphrase exits 3', run.code === 3, `exit ${run.code}`);
+check('it says not to fund the wallet', /do not fund this wallet/.test(run.out), run.out.trim());
+
+const otherPhrase = 'legal winner thank year wave sausage worth useful legal winner thank yellow';
+run = await runWallet(['--restore', '--expect', accountXpub], otherPhrase);
+check('a different valid phrase exits 3', run.code === 3, `exit ${run.code}`);
+check('the expected and derived xpubs are both shown', /expected\s+xpub/.test(run.out) && /restored\s+xpub/.test(run.out), run.out);
+
+run = await runWallet(['--restore', '--expect', tpubAccount], VECTOR);
+check('a testnet tpub never matches a mainnet restore', run.code === 3, `exit ${run.code}`);
+
+console.log('\n== --expect misuse ==');
+run = await runWallet(['--expect', accountXpub], VECTOR);
+check('--expect without --restore exits 1', run.code === 1, `exit ${run.code}`);
+check('and says --restore is needed', /needs --restore/.test(run.out), run.out.trim());
+
+run = await runWallet(['--restore', '--expect', 'hello'], VECTOR);
+check('a value that is neither xpub nor bech32 exits 1', run.code === 1, `exit ${run.code}`);
+
+run = await runWallet(['--restore', '--expect'], VECTOR);
+check('--expect without a value exits 1', run.code === 1, `exit ${run.code}`);
 
 if (failures > 0) {
   console.error(`\nWALLET TESTS FAILED: ${failures} check(s) failed`);

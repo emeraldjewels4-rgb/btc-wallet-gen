@@ -34,6 +34,8 @@ node wallet.mjs --phrase-only > /path/to/encrypted-volume/seed.txt
 ```
 
 That file restores directly with `node wallet.mjs --restore < seed.txt`.
+`--phrase-only` refuses to run when stdout is a terminal, because printing the
+phrase there is what the flag exists to prevent; give it a redirect or a pipe.
 
 ## Restore an existing seed phrase
 
@@ -66,7 +68,25 @@ passphrase in both, which is the one thing not to do with it.
 
 The passphrase is part of the wallet: a wrong or missing passphrase yields a
 different, empty set of addresses. Confirm by comparing address `#0` — or the
-printed receive-chain xpub (`m/84'/0'/0'/0`) — against your existing wallet.
+printed receive-chain xpub (`m/84'/0'/0'/0`) — against your existing wallet, or
+let `--expect` do that comparison for you.
+
+### Check a restore against a value recorded earlier
+
+A restore that yields the wrong wallet still looks like a successful restore.
+Record the account xpub (or address `#0`) when you create the wallet, then let
+the restore compare itself against that value:
+
+```sh
+node wallet.mjs --restore --expect xpub6... < seed.txt
+node wallet.mjs --restore --expect bc1q... < seed.txt
+```
+
+`--expect` takes an account or receive-chain xpub (`xpub`/`tpub`) or a bech32
+address among the ones `--count` prints, needs `--restore`, and exits `3` on a
+mismatch, showing what the phrase actually derives beside what you expected. A
+mistyped phrase that still passes the checksum, a missing 25th word, or a backup
+of a different wallet all fail here, before anything is funded.
 
 ## Flags
 
@@ -75,8 +95,10 @@ printed receive-chain xpub (`m/84'/0'/0'/0`) — against your existing wallet.
 | `--restore` | derive from a seed phrase read from stdin instead of generating one |
 | `--xpub XPUB` | derive from an account (`m/84'/COIN'/0'`) or receive-chain xpub, using `xpub` (mainnet) or `tpub` (testnet), no secret needed |
 | `--count N` | how many receive addresses to print, 1-20 (default 1) |
-| `--show-key` | also print the WIF private key for address #0 |
-| `--phrase-only` | print only the new seed phrase on stdout, so a redirect is a restorable backup; generation only, and never with `--show-key` |
+| `--show-key` | also print the WIF private key for address #0; refused when stdout is a terminal unless `--allow-tty` is passed |
+| `--allow-tty` | print that private key to a terminal anyway |
+| `--phrase-only` | print only the new seed phrase on stdout, so a redirect is a restorable backup; generation only, never with `--show-key`, and refuses to run when stdout is a terminal |
+| `--expect VALUE` | compare a restore against an xpub or address recorded earlier; needs `--restore`, exits 3 on a mismatch |
 | `-h`, `--help` | usage |
 
 Environment: `BIP39_PASSPHRASE` (default empty).
