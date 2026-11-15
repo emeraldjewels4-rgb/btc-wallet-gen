@@ -88,6 +88,25 @@ mismatch, showing what the phrase actually derives beside what you expected. A
 mistyped phrase that still passes the checksum, a missing 25th word, or a backup
 of a different wallet all fail here, before anything is funded.
 
+### Record the wallet so a backup can be checked later
+
+Retyping an xpub years later is how the check gets skipped. `--fingerprint`
+writes the account xpub, the receive-chain xpub and the first five addresses
+(`--count N` for a different number) to a small text file that holds no phrase
+and no key, so it can be committed beside the backup:
+
+```sh
+node wallet.mjs --restore --fingerprint wallet-fingerprint.txt < seed.txt
+node wallet.mjs --restore --expect-file wallet-fingerprint.txt < seed.txt
+```
+
+The second command derives the wallet again and compares every field the file
+carries: exit `0` when they all agree, `3` when any differ (naming the field,
+what was expected and what the phrase derived), `1` when the file is missing or
+is not a fingerprint. A record trimmed down to the two xpubs still verifies what
+it keeps. The file is safe to commit but not private: it ties those addresses
+together and reveals their balances to anyone who reads it.
+
 ## Flags
 
 | Flag | Meaning |
@@ -99,6 +118,8 @@ of a different wallet all fail here, before anything is funded.
 | `--allow-tty` | print that private key to a terminal anyway |
 | `--phrase-only` | print only the new seed phrase on stdout, so a redirect is a restorable backup; generation only, never with `--show-key`, and refuses to run when stdout is a terminal |
 | `--expect VALUE` | compare a restore against an xpub or address recorded earlier; needs `--restore`, exits 3 on a mismatch |
+| `--fingerprint PATH` | write the account xpub, receive-chain xpub and first five addresses (or `--count N`) to `PATH` as a public record (`-` for stdout) |
+| `--expect-file PATH` | compare a restore against that record; needs `--restore`, exits 3 on a mismatch |
 | `-h`, `--help` | usage |
 
 Environment: `BIP39_PASSPHRASE` (default empty).

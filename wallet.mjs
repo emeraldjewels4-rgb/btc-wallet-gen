@@ -8,7 +8,8 @@
  * Addresses are BIP-84 native SegWit (bech32, "bc1q..."), Bitcoin mainnet,
  * derived at m/84'/0'/0'/0/i for the receive chain.
  *
- * No network calls, nothing written to disk.
+ * No network calls. Nothing is written to disk unless --fingerprint asks for a
+ * public record file, which holds no secret.
  *
  * Usage:
  *   node wallet.mjs                       generate: seed phrase + address #0
@@ -17,11 +18,13 @@
  *   node wallet.mjs --restore < seed.txt  restore: derive addresses from a phrase
  *   node wallet.mjs --restore             restore: paste the phrase on stdin
  *   node wallet.mjs --xpub XPUB           derive addresses from a public xpub or tpub
+ *   node wallet.mjs --fingerprint F       write a public record to verify a backup
+ *   node wallet.mjs --restore --expect-file F < seed.txt   check a backup against it
  *
  * A BIP-39 passphrase (the optional 25th word) is read from BIP39_PASSPHRASE.
  */
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { generateMnemonic, mnemonicToSeedSync, validateMnemonic } from 'bip39';
 import { HDKey } from '@scure/bip32';
@@ -34,6 +37,9 @@ const RECEIVE = 0; // external chain: addresses handed out to payers
 // Same meaning as in the treasury tools: a safety check said no. Used when the
 // restored wallet does not match the value recorded for it.
 const EXIT_MISMATCH = 3;
+// A fingerprint is made once and read years later, so it records more than the
+// report's default of one address: a single address pins very little.
+const FINGERPRINT_ADDRESSES = 5;
 
 function fail(message) {
   console.error(`error: ${message}`);
@@ -59,6 +65,15 @@ function usage() {
   --expect VALUE check the restored wallet against an xpub, tpub or address
                 recorded when it was created; a mismatch exits 3, so a wrong
                 phrase or passphrase fails instead of looking like a restore
+  --fingerprint PATH
+                write the account xpub, receive-chain xpub and the first five
+                addresses (--count N to change) to PATH as a public record (no
+                secret in it)
+                that --expect-file can check a backup against years later; '-'
+                writes it to stdout instead
+  --expect-file PATH
+                check the restored wallet against that record; needs --restore,
+                and exits 3 when the phrase, the passphrase or the file is wrong
   -h, --help    show this help
 
 BIP-39 passphrase: set BIP39_PASSPHRASE in the environment.
@@ -69,7 +84,18 @@ Exit codes: 0 ok, 1 usage or config error, 3 the restored wallet does not
 }
 
 function parseArgs(argv) {
-  const opts = { count: 1, showKey: false, allowTty: false, restore: false, phraseOnly: false, xpub: null, expect: null };
+  const opts = {
+    count: 1,
+    countGiven: false,
+    showKey: false,
+    allowTty: false,
+    restore: false,
+    phraseOnly: false,
+    xpub: null,
+    expect: null,
+    fingerprint: null,
+    expectFile: null,
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '-h' || arg === '--help') {
@@ -93,6 +119,16 @@ function parseArgs(argv) {
       }
       opts.expect = value;
       i += 1;
+    } else if (arg === '--expect-file') {
+      const value = argv[i + 1];
+      if (value === undefined || value.startsWith('--')) fail('--expect-file needs a path');
+      opts.expectFile = value;
+      i += 1;
+    } else if (arg === '--fingerprint') {
+      const value = argv[i + 1];
+      if (value === undefined || value.startsWith('--')) fail('--fingerprint needs a path, or - for stdout');
+      opts.fingerprint = value;
+      i += 1;
     } else if (arg === '--xpub') {
       const value = argv[i + 1];
       if (value === undefined || value.startsWith('--')) fail('--xpub needs an extended public key');
@@ -104,6 +140,7 @@ function parseArgs(argv) {
         fail(`--count expects an integer from 1 to 20, got "${argv[i + 1] ?? ''}"`);
       }
       opts.count = value;
+      opts.countGiven = true;
       i += 1;
     } else {
       fail(`unknown argument "${arg}" (try --help)`);
@@ -112,8 +149,18 @@ function parseArgs(argv) {
   if (opts.xpub !== null && opts.restore) fail('--xpub and --restore are mutually exclusive');
   if (opts.xpub !== null && opts.showKey) fail('--show-key needs a seed; an xpub has no private key');
   if (opts.expect !== null && !opts.restore) fail('--expect compares a restored wallet, so it needs --restore');
-  if (opts.phraseOnly && (opts.restore || opts.xpub !== null || opts.showKey)) {
-    fail('--phrase-only writes a new seed phrase and nothing else, so it cannot be combined with --restore, --xpub or --show-key');
+  if (opts.expectFile !== null && !opts.restore) fail('--expect-file compares a restored wallet, so it needs --restore');
+  if (opts.expect !== null && opts.expectFile !== null) {
+    fail('--expect and --expect-file both say what to compare against; pass one');
+  }
+  if (opts.fingerprint !== null && (opts.expect !== null || opts.expectFile !== null)) {
+    fail('--fingerprint writes the record that --expect-file reads; write it in one run, check it in another');
+  }
+  if (opts.fingerprint !== null && opts.xpub !== null) {
+    fail('--fingerprint records a seed-derived wallet, so it cannot be combined with --xpub');
+  }
+  if (opts.phraseOnly && (opts.restore || opts.xpub !== null || opts.showKey || opts.fingerprint !== null)) {
+    fail('--phrase-only writes a new seed phrase and nothing else, so it cannot be combined with --restore, --xpub, --show-key or --fingerprint');
   }
 
   return opts;
@@ -136,6 +183,13 @@ function normalizePhrase(phrase) {
   return phrase.normalize('NFKD').toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
+// A redirected report does contain the phrase, but as prose around it. Saying
+// that beats "not a valid BIP-39 seed phrase", which sends the reader looking
+// for a typo that is not there.
+function looksLikeReport(text) {
+  return /Seed phrase \(BIP-39,?\s*\d+ words\)/.test(text) || /Receive-chain xpub:/.test(text);
+}
+
 // Returns both nodes: --expect may be given either the account xpub
 // (m/84'/COIN'/0') or the receive-chain one (m/84'/COIN'/0'/0), and @scure/bip32
 // does not keep a link back to the parent.
@@ -145,37 +199,164 @@ function receiveNode(mnemonic, passphrase) {
   return { account, receive: account.deriveChild(RECEIVE) };
 }
 
-// Compares a restored wallet against a value recorded when it was created. The
-// failure this catches is a restore that succeeds and yields the wrong wallet:
-// a mistyped phrase that still passes the checksum, a missing 25th word, or a
-// backup of a different wallet entirely.
-function compareExpectation(expect, { account, receive }, count) {
-  const wanted = expect.trim();
+// The public record a backup is checked against years later: account xpub,
+// receive-chain xpub and the first addresses. No phrase, no key, so it can be
+// committed - though it does tie those addresses and their balances together.
+function fingerprintText({ account, receive, count, passphrase }) {
+  const lines = [
+    '# wallet.mjs fingerprint - public data, safe to commit: no phrase, no private key.',
+    '# It does reveal these addresses and their balances to whoever reads it.',
+    `# Recorded from a BIP-39 seed phrase (${passphrase ? 'with' : 'no'} BIP-39 passphrase).`,
+    '# Check a backup against it with:',
+    '#   node wallet.mjs --restore --expect-file <this file> < seed.txt',
+    '',
+    `account-xpub: ${account.publicExtendedKey}`,
+    `receive-chain-xpub: ${receive.publicExtendedKey}`,
+  ];
+  for (let i = 0; i < count; i += 1) {
+    lines.push(`address #${i}: ${receiveAddress(receive, i).address}`);
+  }
+  return `${lines.join('\n')}\n`;
+}
 
-  if (/^[xt]pub/.test(wanted)) {
-    const known = [
-      ['receive-chain xpub', receive.publicExtendedKey],
-      ['account xpub', account.publicExtendedKey],
-    ];
-    const match = known.find(([, value]) => value === wanted);
-    if (match) return { ok: true, what: match[0] };
-    return {
-      ok: false,
-      detail:
-        `  expected     ${wanted}\n` +
-        known.map(([name, value]) => `  restored     ${value} (${name})`).join('\n'),
-    };
+function parseFingerprint(text) {
+  const fields = { accountXpub: null, receiveXpub: null, addresses: [] };
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed === '' || trimmed.startsWith('#')) continue;
+    const entry = /^([a-z][a-z0-9 #-]*):\s*(\S+)$/.exec(trimmed);
+    if (!entry) continue;
+    const [, key, value] = entry;
+    if (key === 'account-xpub') fields.accountXpub = value;
+    else if (key === 'receive-chain-xpub') fields.receiveXpub = value;
+    else if (/^address #\d+$/.test(key)) fields.addresses.push([Number(key.slice('address #'.length)), value]);
+  }
+  fields.addresses.sort((a, b) => a[0] - b[0]);
+  return fields;
+}
+
+// A source becomes expectations - what to compare, and against what. Adding a
+// third source later means producing these, not another comparison and another
+// way of printing the result.
+function expectationsFor(opts) {
+  if (opts.expect !== null) {
+    return /^[xt]pub/.test(opts.expect)
+      ? [{ kind: 'xpub', value: opts.expect }]
+      : [{ kind: 'address-any', value: opts.expect, limit: opts.count }];
   }
 
-  const addresses = Array.from({ length: count }, (_, index) => receiveAddress(receive, index).address);
-  const index = addresses.indexOf(wanted);
-  if (index !== -1) return { ok: true, what: `address #${index}` };
-  return {
-    ok: false,
-    detail:
-      `  expected     ${wanted}\n` +
-      addresses.map((address, i) => `  restored #${i}  ${address}`).join('\n'),
-  };
+  let text;
+  try {
+    text = readFileSync(opts.expectFile, 'utf8');
+  } catch {
+    fail(`cannot read --expect-file ${opts.expectFile}`);
+  }
+  const fields = parseFingerprint(text);
+  const expectations = [];
+  if (fields.accountXpub !== null) expectations.push({ kind: 'account-xpub', value: fields.accountXpub });
+  if (fields.receiveXpub !== null) expectations.push({ kind: 'receive-xpub', value: fields.receiveXpub });
+  for (const [index, value] of fields.addresses) expectations.push({ kind: 'address', index, value });
+  if (expectations.length === 0) {
+    fail(`${opts.expectFile} is not a wallet fingerprint (no account-xpub, receive-chain-xpub or address lines)`);
+  }
+  return expectations;
+}
+
+// One comparison for every source: each expectation resolves to a check, and
+// every check has to agree. The failure this catches is a restore that succeeds
+// and yields the wrong wallet - a mistyped phrase that still passes the
+// checksum, a missing 25th word, or a backup of a different wallet.
+function compareWallet({ account, receive }, expectations) {
+  const checks = expectations.map((expectation) => resolveExpectation(expectation, { account, receive }));
+  return { ok: checks.every((check) => check.ok), checks };
+}
+
+function sameValue(label, expected, actual) {
+  return { label, expected, actual, ok: expected === actual };
+}
+
+function resolveExpectation(expectation, { account, receive }) {
+  switch (expectation.kind) {
+    case 'account-xpub':
+      return sameValue('account xpub', expectation.value, account.publicExtendedKey);
+
+    case 'receive-xpub':
+      return sameValue('receive-chain xpub', expectation.value, receive.publicExtendedKey);
+
+    case 'xpub': {
+      // A bare xpub is accepted at either depth, so both are candidates and the
+      // label reports which one matched.
+      const candidates = [
+        ['account xpub', account.publicExtendedKey],
+        ['receive-chain xpub', receive.publicExtendedKey],
+      ];
+      const match = candidates.find(([, actual]) => actual === expectation.value);
+      return {
+        label: match ? match[0] : 'xpub',
+        expected: expectation.value,
+        actual: candidates.map(([label, actual]) => `${label} ${actual}`).join('\n    '),
+        ok: Boolean(match),
+      };
+    }
+
+    case 'address':
+      return sameValue(
+        `address #${expectation.index}`,
+        expectation.value,
+        receiveAddress(receive, expectation.index).address,
+      );
+
+    case 'address-any': {
+      // A bare address may sit at any index up to --count; every index searched
+      // is shown when none matches.
+      const seen = Array.from({ length: expectation.limit }, (_, index) => ({
+        index,
+        address: receiveAddress(receive, index).address,
+      }));
+      const match = seen.find(({ address }) => address === expectation.value);
+      return {
+        label: match ? `address #${match.index}` : 'address',
+        expected: expectation.value,
+        actual: seen.map(({ index, address }) => `#${index} ${address}`).join('\n    '),
+        ok: Boolean(match),
+      };
+    }
+
+    default:
+      return sameValue(expectation.kind, expectation.value, 'no such expectation');
+  }
+}
+
+// The one place the outcome is printed, whatever produced the expectations.
+function reportVerdict(verdict, source) {
+  console.log('');
+  if (verdict.ok) {
+    console.log(`Verified: the restored wallet matches ${source} (${summarize(verdict.checks)}).`);
+    return;
+  }
+
+  const detail = verdict.checks
+    .filter((check) => !check.ok)
+    .map((check) => `  ${check.label}\n    expected  ${check.expected}\n    restored  ${check.actual}`)
+    .join('\n');
+  console.error(`error: ${source} does not match the restored wallet\n${detail}`);
+  console.error('  the phrase, the passphrase or the recorded value is wrong - do not fund this wallet');
+  process.exitCode = EXIT_MISMATCH;
+}
+
+// "account xpub, receive-chain xpub, addresses #0..#4": consecutive addresses
+// collapse, so five of them do not become five clauses.
+function summarize(checks) {
+  const labels = checks.map((check) => check.label);
+  const isAddress = (label) => /^address #\d+$/.test(label);
+  const indices = labels
+    .filter(isAddress)
+    .map((label) => Number(label.slice('address #'.length)))
+    .sort((a, b) => a - b);
+  const rest = labels.filter((label) => !isAddress(label));
+  if (indices.length === 1) rest.push(`address #${indices[0]}`);
+  else if (indices.length > 1) rest.push(`addresses #${indices[0]}..#${indices[indices.length - 1]}`);
+  return rest.join(', ');
 }
 
 // Version bytes tell an xpub (mainnet) from a tpub (testnet); passing them keeps
@@ -271,8 +452,17 @@ async function main() {
 
   let mnemonic;
   if (opts.restore) {
-    mnemonic = normalizePhrase(await readPhrase());
+    const raw = await readPhrase();
+    mnemonic = normalizePhrase(raw);
     if (!mnemonic) fail('no seed phrase received on stdin');
+    if (looksLikeReport(raw)) {
+      fail(
+        'that input is the full report from wallet.mjs, not a seed phrase\n' +
+          '  the phrase is the 24-word line inside it - extract just that line\n' +
+          '  or generate again with --phrase-only, which writes only the words, so\n' +
+          '  node wallet.mjs --phrase-only > seed.txt is a file --restore accepts directly',
+      );
+    }
     if (!validateMnemonic(mnemonic)) {
       fail(
         'that is not a valid BIP-39 seed phrase (expects 12, 15, 18, 21 or 24 words ' +
@@ -327,17 +517,22 @@ async function main() {
       : 'Anyone holding the seed phrase or private key can spend these funds.',
   );
 
-  // Last, so the outcome is the final line a human reads.
-  if (opts.expect !== null) {
-    const verdict = compareExpectation(opts.expect, { account, receive }, opts.count);
-    console.log('');
-    if (verdict.ok) {
-      console.log(`Verified: the restored ${verdict.what} matches --expect.`);
+  if (opts.fingerprint !== null) {
+    const addressesToRecord = opts.countGiven ? opts.count : FINGERPRINT_ADDRESSES;
+    const text = fingerprintText({ account, receive, count: addressesToRecord, passphrase });
+    if (opts.fingerprint === '-') {
+      process.stdout.write(text);
     } else {
-      console.error(`error: --expect does not match the restored wallet\n${verdict.detail}`);
-      console.error('  the phrase, the passphrase or the recorded value is wrong - do not fund this wallet');
-      process.exitCode = EXIT_MISMATCH;
+      writeFileSync(opts.fingerprint, text);
+      console.error(`wrote ${opts.fingerprint} - no phrase and no key in it, so it is safe to commit`);
     }
+  }
+
+  // Last, so the outcome is the final line a human reads. Both sources go
+  // through the same comparison and the same report.
+  if (opts.expect !== null || opts.expectFile !== null) {
+    const source = opts.expectFile !== null ? `--expect-file ${opts.expectFile}` : '--expect';
+    reportVerdict(compareWallet({ account, receive }, expectationsFor(opts)), source);
   }
 }
 

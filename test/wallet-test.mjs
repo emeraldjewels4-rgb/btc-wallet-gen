@@ -11,6 +11,8 @@
  */
 
 import { spawn } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HDKey } from '@scure/bip32';
@@ -174,6 +176,130 @@ check('the refusal prints no phrase', run.stdout === '', JSON.stringify(run.stdo
 run = await runWallet(['--phrase-only', '--xpub', accountXpub]);
 check('--phrase-only with --xpub exits 1', run.code === 1, `exit ${run.code}`);
 
+console.log('\n== fingerprint record ==');
+const fpDir = mkdtempSync(join(tmpdir(), 'wallet-fingerprint-'));
+const fpPath = join(fpDir, 'wallet-fingerprint.txt');
+
+run = await runWallet(['--restore', '--fingerprint', fpPath, '--count', '3'], VECTOR);
+check('recording a fingerprint exits 0', run.code === 0, `exit ${run.code}: ${run.out}`);
+check('it says the file is safe to commit', /safe to commit/.test(run.stderr), run.stderr.trim());
+const fpText = readFileSync(fpPath, 'utf8');
+check('the record holds the account xpub', fpText.includes(accountXpub), fpText.split('\n')[6]);
+check('the record holds the receive-chain xpub', fpText.includes(receiveXpub), fpText.split('\n')[7]);
+check('the record holds address #0', fpText.includes(EXPECTED_0), fpText);
+check('the record holds address #1', fpText.includes(EXPECTED_1), fpText);
+check('the record holds three addresses', (fpText.match(/^address #\d+: /gm) ?? []).length === 3, fpText);
+const defaultPath = join(fpDir, 'default.txt');
+run = await runWallet(['--restore', '--fingerprint', defaultPath], VECTOR);
+const defaultText = readFileSync(defaultPath, 'utf8');
+check(
+  'without --count a record pins five addresses',
+  (defaultText.match(/^address #\d+: /gm) ?? []).length === 5,
+  String((defaultText.match(/^address #\d+: /gm) ?? []).length),
+);
+check(
+  'and they are the vector addresses',
+  defaultText.includes(EXPECTED_0) && defaultText.includes(EXPECTED_1),
+  defaultText,
+);
+
+run = await runWallet(['--restore', '--expect-file', defaultPath], VECTOR);
+check('a five-address record verifies all five', run.code === 0, `exit ${run.code}`);
+check('and summarises the range', /addresses #0\.\.#4/.test(run.out), run.out);
+
+run = await runWallet([]);
+check(
+  'the report still prints one address by default',
+  (run.stdout.match(/^ {2}#\d+ /gm) ?? []).length === 1,
+  run.stdout,
+);
+
+check('no phrase word reaches the record', !fpText.includes('abandon'), fpText);
+check('no extended private key reaches the record', !/xprv|tprv/.test(fpText), fpText);
+check('it documents how to check a backup', /--expect-file/.test(fpText), fpText);
+
+run = await runWallet(['--restore', '--expect-file', fpPath], VECTOR);
+check('a matching record verifies', run.code === 0, `exit ${run.code}: ${run.out}`);
+check(
+  'and lists what it checked',
+  /matches --expect-file .*\(account xpub, receive-chain xpub, addresses #0\.\.#2\)/.test(run.out),
+  run.out,
+);
+
+run = await runWallet(['--restore', '--expect-file', fpPath], VECTOR, { BIP39_PASSPHRASE: 'wrong' });
+check('the wrong passphrase against a record exits 3', run.code === 3, `exit ${run.code}`);
+
+run = await runWallet(
+  ['--restore', '--expect-file', fpPath],
+  'legal winner thank year wave sausage worth useful legal winner thank yellow',
+);
+check('a different wallet against a record exits 3', run.code === 3, `exit ${run.code}`);
+
+const tamperedPath = join(fpDir, 'tampered.txt');
+writeFileSync(tamperedPath, fpText.replace(/^address #2: \S+$/m, `address #2: ${EXPECTED_0}`));
+run = await runWallet(['--restore', '--expect-file', tamperedPath], VECTOR);
+check('a tampered address exits 3', run.code === 3, `exit ${run.code}`);
+check('and names the field', /address #2/.test(run.out), run.out.trim());
+
+const xpubOnlyPath = join(fpDir, 'xpub-only.txt');
+writeFileSync(
+  xpubOnlyPath,
+  fpText
+    .split('\n')
+    .filter((line) => line.startsWith('account-xpub:') || line.startsWith('receive-chain-xpub:'))
+    .join('\n'),
+);
+run = await runWallet(['--restore', '--expect-file', xpubOnlyPath], VECTOR);
+check('a trimmed record still verifies what it keeps', run.code === 0, `exit ${run.code}: ${run.out}`);
+check('and says only that', /\(account xpub, receive-chain xpub\)/.test(run.out), run.out);
+
+run = await runWallet(['--fingerprint', join(fpDir, 'generated.txt')]);
+check(
+  'a generated wallet can be recorded too',
+  run.code === 0 && readFileSync(join(fpDir, 'generated.txt'), 'utf8').includes('account-xpub:'),
+  `exit ${run.code}`,
+);
+
+run = await runWallet(['--restore', '--expect-file', join(fpDir, 'missing.txt')], VECTOR);
+check('a missing record exits 1', run.code === 1, `exit ${run.code}`);
+check('and says it cannot be read', /cannot read --expect-file/.test(run.out), run.out.trim());
+
+writeFileSync(join(fpDir, 'junk.txt'), 'hello there\n');
+run = await runWallet(['--restore', '--expect-file', join(fpDir, 'junk.txt')], VECTOR);
+check('a file that is not a record exits 1', run.code === 1, `exit ${run.code}`);
+check('and says so', /is not a wallet fingerprint/.test(run.out), run.out.trim());
+
+run = await runWallet(['--expect-file', fpPath], VECTOR);
+check('--expect-file without --restore exits 1', run.code === 1, `exit ${run.code}`);
+
+run = await runWallet(['--restore', '--expect', accountXpub, '--expect-file', fpPath], VECTOR);
+check('--expect and --expect-file cannot be combined', run.code === 1, `exit ${run.code}`);
+
+run = await runWallet(['--xpub', receiveXpub, '--fingerprint', join(fpDir, 'x.txt')]);
+check('--fingerprint with --xpub exits 1', run.code === 1, `exit ${run.code}`);
+
+run = await runWallet(['--phrase-only', '--fingerprint', join(fpDir, 'y.txt')]);
+check('--phrase-only with --fingerprint exits 1', run.code === 1, `exit ${run.code}`);
+
+rmSync(fpDir, { recursive: true, force: true });
+
+console.log('\n== a report is not a phrase ==');
+const report = await runWallet([]);
+run = await runWallet(['--restore'], report.stdout);
+check('feeding the whole report exits 1', run.code === 1, `exit ${run.code}`);
+check('it names the input as the report', /full report from wallet\.mjs/.test(run.out), run.out.trim());
+check('it says the phrase is the 24-word line inside it', /24-word line inside it/.test(run.out), run.out.trim());
+check('it points at --phrase-only', /--phrase-only/.test(run.out), run.out.trim());
+check('the generic phrase error is not used', !/not a valid BIP-39 seed phrase/.test(run.out), run.out.trim());
+
+const phraseLine = (report.stdout.match(/^ {2}([a-z]+ ){23}[a-z]+$/m) ?? [''])[0].trim();
+run = await runWallet(['--restore'], phraseLine);
+check('the line it points at does restore', run.code === 0, `exit ${run.code}: ${run.out.trim().slice(0, 80)}`);
+
+run = await runWallet(['--restore'], 'hello darkness my old friend');
+check('a plain bad phrase keeps the generic error', run.code === 1, `exit ${run.code}`);
+check('and is not mistaken for a report', /not a valid BIP-39 seed phrase/.test(run.out), run.out.trim());
+
 console.log('\n== secrets refuse a terminal ==');
 run = await runWalletOnTerminal(['--phrase-only']);
 check('--phrase-only on a terminal exits 1', run.code === 1, `exit ${run.code}`);
@@ -201,24 +327,24 @@ const vectorAddress2 = (listing.out.match(/#2\s+\S+\s+(\S+)/) ?? [])[1];
 
 run = await runWallet(['--restore', '--expect', accountXpub], VECTOR);
 check('a matching account xpub exits 0', run.code === 0, `exit ${run.code}: ${run.out}`);
-check('and names what matched', /Verified: the restored account xpub matches --expect/.test(run.out), run.out);
+check('and names what matched', /matches --expect \(account xpub\)/.test(run.out), run.out);
 
 run = await runWallet(['--restore', '--expect', receiveXpub], VECTOR);
 check('a matching receive-chain xpub exits 0', run.code === 0, `exit ${run.code}`);
-check('and distinguishes the depth', /Verified: the restored receive-chain xpub/.test(run.out), run.out);
+check('and distinguishes the depth', /matches --expect \(receive-chain xpub\)/.test(run.out), run.out);
 
 run = await runWallet(['--restore', '--expect', EXPECTED_0], VECTOR);
 check('a matching address #0 exits 0', run.code === 0, `exit ${run.code}`);
-check('and names the index', /Verified: the restored address #0 matches --expect/.test(run.out), run.out);
+check('and names the index', /matches --expect \(address #0\)/.test(run.out), run.out);
 
 run = await runWallet(['--restore', '--count', '3', '--expect', vectorAddress2], VECTOR);
 check('an address inside --count matches', run.code === 0, `exit ${run.code}: ${run.out}`);
-check('and is reported by index', /the restored address #2/.test(run.out), run.out);
+check('and is reported by index', /matches --expect \(address #2\)/.test(run.out), run.out);
 
 console.log('\n== --expect catches the wrong wallet ==');
 run = await runWallet(['--restore', '--expect', vectorAddress2], VECTOR);
 check('an address outside --count exits 3', run.code === 3, `exit ${run.code}`);
-check('the mismatch shows both sides', /expected\s+bc1q/.test(run.out) && /restored #0/.test(run.out), run.out);
+check('the mismatch shows both sides', /expected\s+bc1q/.test(run.out) && /restored\s+#0/.test(run.out), run.out);
 
 run = await runWallet(['--restore', '--expect', accountXpub], VECTOR, { BIP39_PASSPHRASE: 'wrong' });
 check('right phrase, wrong passphrase exits 3', run.code === 3, `exit ${run.code}`);
@@ -227,7 +353,11 @@ check('it says not to fund the wallet', /do not fund this wallet/.test(run.out),
 const otherPhrase = 'legal winner thank year wave sausage worth useful legal winner thank yellow';
 run = await runWallet(['--restore', '--expect', accountXpub], otherPhrase);
 check('a different valid phrase exits 3', run.code === 3, `exit ${run.code}`);
-check('the expected and derived xpubs are both shown', /expected\s+xpub/.test(run.out) && /restored\s+xpub/.test(run.out), run.out);
+check(
+  'the expected and derived xpubs are both shown',
+  /expected\s+xpub/.test(run.out) && /restored\s+account xpub xpub/.test(run.out),
+  run.out,
+);
 
 run = await runWallet(['--restore', '--expect', tpubAccount], VECTOR);
 check('a testnet tpub never matches a mainnet restore', run.code === 3, `exit ${run.code}`);
