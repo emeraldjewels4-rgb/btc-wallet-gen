@@ -179,6 +179,20 @@ async function main() {
     return;
   }
 
+  // Phrase-only is its own mode, like --xpub: generate, write, stop. The report
+  // below is not a backup, because --restore wants a phrase and not prose, so
+  // this writes the 24 words and nothing else - which makes `> seed.txt` a file
+  // --restore accepts.
+  if (opts.phraseOnly) {
+    if (passphrase) {
+      process.stderr.write(
+        'note: BIP39_PASSPHRASE is set, so this phrase alone restores a different wallet\n',
+      );
+    }
+    process.stdout.write(`${generateMnemonic(256)}\n`);
+    return;
+  }
+
   let mnemonic;
   if (opts.restore) {
     mnemonic = normalizePhrase(await readPhrase());
@@ -191,19 +205,6 @@ async function main() {
     }
   } else {
     mnemonic = generateMnemonic(256);
-  }
-
-  // The full report below is not a backup: --restore wants a phrase, not prose,
-  // so a redirected report cannot be restored. This mode writes the 24 words
-  // and nothing else, which makes `> seed.txt` a file --restore accepts.
-  if (opts.phraseOnly) {
-    if (passphrase) {
-      process.stderr.write(
-        'note: BIP39_PASSPHRASE is set, so this phrase alone restores a different wallet\n',
-      );
-    }
-    process.stdout.write(`${mnemonic}\n`);
-    return;
   }
 
   const receive = receiveNode(mnemonic, passphrase);

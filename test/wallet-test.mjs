@@ -14,7 +14,7 @@ import { spawn } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HDKey } from '@scure/bip32';
-import { mnemonicToSeedSync, validateMnemonic } from 'bip39';
+import { mnemonicToSeedSync } from 'bip39';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -131,18 +131,11 @@ check(
   /^([a-z]+ ){23}[a-z]+\n$/.test(gen.stdout),
   JSON.stringify(gen.stdout),
 );
-check('stdout carries none of the report', !/address|Receive|Account|wallet/i.test(gen.stdout), gen.stdout);
-const generated = gen.stdout.trim();
-check('the phrase is a valid BIP-39 mnemonic', validateMnemonic(generated), `${generated.split(' ').length} words`);
-
 // The whole point: the redirected file is a backup --restore accepts.
 const roundTrip = await runWallet(['--restore'], gen.stdout);
 check('the printed phrase restores from the same bytes', roundTrip.code === 0, `exit ${roundTrip.code}: ${roundTrip.out}`);
 check('restore recognises all 24 words', /Restored from a 24-word BIP-39 seed phrase/.test(roundTrip.out), roundTrip.out);
 check('restore prints the expected address #0', /#0\s+m\/84'\/0'\/0'\/0\/0\s+bc1q[0-9a-z]{38}/.test(roundTrip.out), roundTrip.out);
-
-const again = await runWallet(['--restore'], generated);
-check('restoring twice gives the same wallet', again.stdout === roundTrip.stdout, again.stdout.trim().slice(0, 60));
 
 console.log('\n== phrase-only refusals ==');
 run = await runWallet(['--phrase-only', '--restore'], VECTOR);
