@@ -207,6 +207,10 @@ run = await runWallet(['--restore', '--expect-file', defaultPath], VECTOR);
 check('a five-address record verifies all five', run.code === 0, `exit ${run.code}`);
 check('and summarises the range', /addresses #0\.\.#4/.test(run.out), run.out);
 
+run = await runWallet(['--xpub', accountXpub]);
+check('an xpub with no --count prints one address', (run.stdout.match(/^ {2}#\d+ /gm) ?? []).length === 1, run.stdout);
+check('and it is address #0', run.stdout.includes(EXPECTED_0), run.stdout);
+
 run = await runWallet([]);
 check(
   'the report still prints one address by default',
@@ -217,12 +221,75 @@ check(
 check('no phrase word reaches the record', !fpText.includes('abandon'), fpText);
 check('no extended private key reaches the record', !/xprv|tprv/.test(fpText), fpText);
 check('it documents how to check a backup', /--expect-file/.test(fpText), fpText);
+check('it records its format version', /^fingerprint-version: 1$/m.test(fpText), fpText);
+check("it records the derivation path", /^path: m\/84'\/0'\/0'$/m.test(fpText), fpText);
+check('it records that no 25th word was used', /^passphrase: none$/m.test(fpText), fpText);
+
+console.log('\n== the record says which passphrase it needs ==');
+const passPath = join(fpDir, 'with-passphrase.txt');
+run = await runWallet(['--restore', '--fingerprint', passPath, '--count', '2'], VECTOR, {
+  BIP39_PASSPHRASE: '25th word',
+});
+const passText = readFileSync(passPath, 'utf8');
+check('a passphrase record says it is required', /^passphrase: required$/m.test(passText), passText);
+
+run = await runWallet(['--restore', '--expect-file', passPath], VECTOR);
+check('verifying it without the 25th word exits 3', run.code === 3, `exit ${run.code}`);
+check(
+  'the message names the passphrase, not the phrase',
+  /made with a 25th word and BIP39_PASSPHRASE is not set/.test(run.out),
+  run.out,
+);
+check('and not the generic blame', !/phrase, the passphrase or the recorded value/.test(run.out), run.out);
+check(
+  'the failing check is shown as a comparison',
+  /BIP-39 passphrase/.test(run.out) && /expected\s+required/.test(run.out) && /restored\s+none/.test(run.out),
+  run.out,
+);
+
+run = await runWallet(['--restore', '--expect-file', passPath], VECTOR, { BIP39_PASSPHRASE: 'wrong word' });
+check('a wrong 25th word still falls back to the generic blame', /phrase, the passphrase or the recorded value/.test(run.out), run.out);
+
+run = await runWallet(['--restore', '--expect-file', fpPath], VECTOR, { BIP39_PASSPHRASE: 'unwanted' });
+check('a 25th word against a no-passphrase record exits 3', run.code === 3, `exit ${run.code}`);
+check('and says to unset it', /made without a 25th word but BIP39_PASSPHRASE is set/.test(run.out), run.out);
+
+console.log('\n== a record for somewhere else ==');
+const futurePath = join(fpDir, 'version-99.txt');
+writeFileSync(futurePath, fpText.replace('fingerprint-version: 1', 'fingerprint-version: 99'));
+run = await runWallet(['--restore', '--expect-file', futurePath], VECTOR);
+check('an unknown version exits 1', run.code === 1, `exit ${run.code}`);
+check('and names both versions', /version 99/.test(run.out) && /reads version 1/.test(run.out), run.out.trim());
+
+const otherPath = join(fpDir, 'testnet-path.txt');
+writeFileSync(otherPath, fpText.replace(/^path: .*$/m, "path: m/84'/1'/0'"));
+run = await runWallet(['--restore', '--expect-file', otherPath], VECTOR);
+check('a record for another path exits 3', run.code === 3, `exit ${run.code}`);
+check(
+  'and explains it is not this wallet',
+  /that record covers m\/84'\/1'\/0' and this tool restores m\/84'\/0'\/0'/.test(run.out),
+  run.out,
+);
+
+const legacyPath = join(fpDir, 'legacy.txt');
+writeFileSync(
+  legacyPath,
+  fpText
+    .split('\n')
+    .filter((line) => !/^(fingerprint-version|path|passphrase):/.test(line))
+    .join('\n'),
+);
+run = await runWallet(['--restore', '--expect-file', legacyPath], VECTOR);
+check('a record without provenance still verifies', run.code === 0, `exit ${run.code}: ${run.out}`);
+check('and says only what it checked', /matches --expect-file .*\(account xpub, receive-chain xpub, addresses #0\.\.#2\)/.test(run.out), run.out);
 
 run = await runWallet(['--restore', '--expect-file', fpPath], VECTOR);
 check('a matching record verifies', run.code === 0, `exit ${run.code}: ${run.out}`);
 check(
   'and lists what it checked',
-  /matches --expect-file .*\(account xpub, receive-chain xpub, addresses #0\.\.#2\)/.test(run.out),
+  /matches --expect-file .*\(derivation path, BIP-39 passphrase, account xpub, receive-chain xpub, addresses #0\.\.#2\)/.test(
+    run.out,
+  ),
   run.out,
 );
 
@@ -341,10 +408,31 @@ run = await runWallet(['--restore', '--count', '3', '--expect', vectorAddress2],
 check('an address inside --count matches', run.code === 0, `exit ${run.code}: ${run.out}`);
 check('and is reported by index', /matches --expect \(address #2\)/.test(run.out), run.out);
 
+// The default window is the same five a fingerprint records, so an address out
+// of a record needs no extra flag to verify.
+const four = await runWallet(['--xpub', receiveXpub, '--count', '4']);
+const vectorAddress3 = (four.out.match(/#3\s+\S+\s+(\S+)/) ?? [])[1];
+run = await runWallet(['--restore', '--expect', vectorAddress3], VECTOR);
+check('by default a bare address is found at #3', run.code === 0, `exit ${run.code}: ${run.out}`);
+check('and says which index matched', /matches --expect \(address #3\)/.test(run.out), run.out);
+
 console.log('\n== --expect catches the wrong wallet ==');
-run = await runWallet(['--restore', '--expect', vectorAddress2], VECTOR);
-check('an address outside --count exits 3', run.code === 3, `exit ${run.code}`);
-check('the mismatch shows both sides', /expected\s+bc1q/.test(run.out) && /restored\s+#0/.test(run.out), run.out);
+run = await runWallet(['--restore', '--count', '2', '--expect', vectorAddress2], VECTOR);
+check('an address outside an explicit --count exits 3', run.code === 3, `exit ${run.code}`);
+check(
+  'the mismatch shows both sides',
+  /expected\s+bc1q/.test(run.out) && /restored\s+no match in #0\.\.#1/.test(run.out),
+  run.out,
+);
+
+const missingAddress = `${vectorAddress2.slice(0, -1)}${vectorAddress2.endsWith('z') ? 'q' : 'z'}`;
+run = await runWallet(['--restore', '--expect', missingAddress], VECTOR);
+check('an address in no slot of the default window exits 3', run.code === 3, `exit ${run.code}`);
+check(
+  'and says where it looked, with #0 as the sample',
+  /restored\s+no match in #0\.\.#4; #0 is bc1q[0-9a-z]{38}$/m.test(run.out),
+  run.out,
+);
 
 run = await runWallet(['--restore', '--expect', accountXpub], VECTOR, { BIP39_PASSPHRASE: 'wrong' });
 check('right phrase, wrong passphrase exits 3', run.code === 3, `exit ${run.code}`);
@@ -361,6 +449,15 @@ check(
 
 run = await runWallet(['--restore', '--expect', tpubAccount], VECTOR);
 check('a testnet tpub never matches a mainnet restore', run.code === 3, `exit ${run.code}`);
+check('the message names the network, not the phrase', /testnet and this wallet restores mainnet only/.test(run.out), run.out.trim());
+check('and does not blame the passphrase', !/passphrase or the recorded value/.test(run.out), run.out.trim());
+
+run = await runWallet(['--restore', '--expect', EXPECTED_TESTNET_0], VECTOR);
+check('a testnet address never matches either', run.code === 3, `exit ${run.code}`);
+check('and is explained the same way', /testnet and this wallet restores mainnet only/.test(run.out), run.out.trim());
+
+run = await runWallet(['--restore', '--expect', accountXpub], VECTOR, { BIP39_PASSPHRASE: 'wrong' });
+check('a genuinely wrong passphrase still blames the passphrase', /passphrase or the recorded value is wrong/.test(run.out), run.out.trim());
 
 console.log('\n== --expect misuse ==');
 run = await runWallet(['--expect', accountXpub], VECTOR);

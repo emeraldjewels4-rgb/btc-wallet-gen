@@ -83,10 +83,11 @@ node wallet.mjs --restore --expect bc1q... < seed.txt
 ```
 
 `--expect` takes an account or receive-chain xpub (`xpub`/`tpub`) or a bech32
-address among the ones `--count` prints, needs `--restore`, and exits `3` on a
-mismatch, showing what the phrase actually derives beside what you expected. A
-mistyped phrase that still passes the checksum, a missing 25th word, or a backup
-of a different wallet all fail here, before anything is funded.
+address, looked for among the addresses `--count` covers (five by default),
+needs `--restore`, and exits `3` on a mismatch, showing what the phrase actually
+derives beside what you expected. A mistyped phrase that still passes the
+checksum, a missing 25th word, or a backup of a different wallet all fail here,
+before anything is funded.
 
 ### Record the wallet so a backup can be checked later
 
@@ -107,13 +108,19 @@ is not a fingerprint. A record trimmed down to the two xpubs still verifies what
 it keeps. The file is safe to commit but not private: it ties those addresses
 together and reveals their balances to anyone who reads it.
 
+The record also carries `fingerprint-version`, `path` and `passphrase`, so the
+check can say what actually went wrong: a missing 25th word is named as such
+instead of being blamed on the phrase, a record made for a different derivation
+path says so, and a version this tool does not understand is refused rather than
+half-read. Older records without those lines still verify normally.
+
 ## Flags
 
 | Flag | Meaning |
 | --- | --- |
 | `--restore` | derive from a seed phrase read from stdin instead of generating one |
 | `--xpub XPUB` | derive from an account (`m/84'/COIN'/0'`) or receive-chain xpub, using `xpub` (mainnet) or `tpub` (testnet), no secret needed |
-| `--count N` | how many receive addresses to print, 1-20 (default 1) |
+| `--count N` | how many addresses to cover, 1-20: printed (default 1), or recorded and searched by `--fingerprint` and `--expect` (default 5) |
 | `--show-key` | also print the WIF private key for address #0; refused when stdout is a terminal unless `--allow-tty` is passed |
 | `--allow-tty` | print that private key to a terminal anyway |
 | `--phrase-only` | print only the new seed phrase on stdout, so a redirect is a restorable backup; generation only, never with `--show-key`, and refuses to run when stdout is a terminal |
