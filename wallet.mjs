@@ -28,6 +28,7 @@
  */
 
 import { readFileSync, statSync, writeFileSync } from 'node:fs';
+import { BACKUP_STATE_DEFAULT } from './backup-state.mjs';
 import { createInterface } from 'node:readline/promises';
 import { generateMnemonic, mnemonicToSeedSync, validateMnemonic } from 'bip39';
 import { HDKey } from '@scure/bip32';
@@ -45,9 +46,6 @@ const EXIT_MISMATCH = 3;
 // front of you, so both cover a handful of addresses by default; --count
 // overrides them, and the report's default of one lives where it is printed.
 const CHECKED_ADDRESSES = 5;
-// Where a successful --expect-file run leaves its timestamp, so watchdog.mjs can
-// say when the drill was last done. Holds no secret, and is git-ignored.
-const VERIFY_STATE = '.wallet-verify-state.json';
 // Bumped when the record's fields change shape. A reader that does not know a
 // version refuses the file rather than verifying the half of it it understands.
 const FINGERPRINT_VERSION = 1;
@@ -74,7 +72,7 @@ function usage() {
                 instead, created 0600 and never overwritten
   --verify-state PATH
                 where a successful --expect-file records its timestamp, for
-                watchdog.mjs (default ${VERIFY_STATE})
+                watchdog.mjs (default ${BACKUP_STATE_DEFAULT})
   --passphrase-file PATH
                 read the BIP-39 passphrase (25th word) from the first line of
                 PATH; at a terminal with no file or variable, it is asked for
@@ -113,7 +111,9 @@ function parseArgs(argv) {
     allowTty: false,
     passphraseFile: null,
     out: null,
-    verifyState: VERIFY_STATE,
+    // Where a successful --expect-file run leaves its timestamp; watchdog.mjs
+    // and the weekly roll-up read the same file. Holds no secret, git-ignored.
+    verifyState: BACKUP_STATE_DEFAULT,
     restore: false,
     phraseOnly: false,
     xpub: null,

@@ -22,6 +22,8 @@ const WEBHOOK_FILE = join(tmpdir(), 'weekly-test-webhook.txt');
 const MISSING_WEBHOOK_FILE = join(tmpdir(), 'weekly-test-webhook-missing.txt');
 const MISSING_AUDIT = join(tmpdir(), 'weekly-test-missing.jsonl');
 const STATE = join(tmpdir(), 'weekly-test-state.json');
+const WALLET_STATE = join(tmpdir(), 'weekly-test-wallet-state.json');
+const DAY = 24 * 60 * 60 * 1000;
 
 let failures = 0;
 function check(label, condition, detail = '') {
@@ -56,9 +58,12 @@ const btcEntry = (overrides) =>
     ...overrides,
   });
 
+// Every run points at a scratch backup state, so the message does not depend on
+// whatever the machine running this test has verified.
 function runWeekly(args, envExtra = {}) {
+  const full = args.includes('--wallet-state') ? args : ['--wallet-state', WALLET_STATE, ...args];
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, ['treasury-weekly.mjs', ...args], {
+    const child = spawn(process.execPath, ['treasury-weekly.mjs', ...full], {
       cwd: ROOT,
       env: { ...process.env, SLACK_WEBHOOK_URL: '', SLACK_WEBHOOK_FILE: '', ...envExtra },
     });
@@ -81,6 +86,7 @@ try {
   rmSync(MISSING_AUDIT, { force: true });
   rmSync(NOFEE_AUDIT, { force: true });
   rmSync(STATE, { force: true });
+  rmSync(WALLET_STATE, { force: true });
   writeFileSync(EMPTY_AUDIT, '');
 
   // ISO week 2026-W45 is 2026-11-02 .. 2026-11-08 (UTC); W44 is 2026-10-26 .. 11-01.
@@ -225,6 +231,36 @@ try {
     existsSync(skipState) && JSON.parse(readFileSync(skipState, 'utf8')).skipLoggedWeek === '2026-W45',
   );
 
+  console.log('\n== the message carries the backup age ==');
+  rmSync(WALLET_STATE, { force: true });
+  run = await runWeekly(['--audit', AUDIT]);
+  check('a missing timestamp is said plainly', /no backup verification recorded yet/.test(run.out), run.out.trim());
+  check('and says how to produce one', /--restore --expect-file/.test(run.out), run.out.trim());
+
+  writeFileSync(WALLET_STATE, JSON.stringify({ verifiedAt: new Date().toISOString() }));
+  run = await runWeekly(['--audit', AUDIT]);
+  check(
+    'a fresh drill is dated',
+    /last verified \d{4}-\d{2}-\d{2} \(0\.0 days ago\)/.test(run.out),
+    run.out.trim(),
+  );
+
+  writeFileSync(WALLET_STATE, JSON.stringify({ verifiedAt: new Date(Date.now() - 240 * DAY).toISOString() }));
+  run = await runWeekly(['--audit', AUDIT]);
+  check('an old one shows its age, before any alert', /\(240\.0 days ago\)/.test(run.out), run.out.trim());
+  check('the section is labelled', /\*Backup check\*/.test(run.out), run.out.trim());
+
+  const beforePost = slack.messages.length;
+  writeFileSync(WALLET_STATE, JSON.stringify({ verifiedAt: new Date(Date.now() - 3 * DAY).toISOString() }));
+  run = await runWeekly(['--audit', AUDIT, '--week', '2026-W45', '--post', '--force', '--webhook-file', WEBHOOK_FILE]);
+  check('the posted message carries it too', (slack.messages.at(-1)?.text ?? '').includes('*Backup check*'), slack.messages.at(-1)?.text);
+  check('and the age is in the posted text', /\(3\.0 days ago\)/.test(slack.messages.at(-1)?.text ?? ''));
+  check('the post still went out', slack.messages.length === beforePost + 1);
+
+  writeFileSync(WALLET_STATE, 'not json');
+  run = await runWeekly(['--audit', AUDIT]);
+  check('an unreadable one says so', /is unreadable - re-run the restore check/.test(run.out), run.out.trim());
+
   console.log('\n== errors ==');
   run = await runWeekly([...base, '--post']);
   check('--post without a webhook exits 0 (clean skip)', run.code === 0, `exit ${run.code}`);
@@ -258,4 +294,5 @@ try {
   rmSync(NOFEE_AUDIT, { force: true });
   rmSync(WEBHOOK_FILE, { force: true });
   rmSync(STATE, { force: true });
+  rmSync(WALLET_STATE, { force: true });
 }

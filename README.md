@@ -141,9 +141,9 @@ than leaving them out silently; pass the account key to see them.
 
 A successful check leaves its timestamp in `.wallet-verify-state.json` (no secret,
 and git-ignored), so `watchdog.mjs` can complain once the drill has not been run
-for six months. `--verify-state PATH` writes it somewhere else, which is what you
-want when the check is done on the off-line machine and the watchdog runs on
-another.
+for more than 180 days. `--verify-state PATH` writes it somewhere else, which is
+what you want when the check is done on the off-line machine and the watchdog
+runs on another.
 
 The record states its own derivation - `path` (`m/84'/0'/0'`), `coin` (`0`),
 `receive-path` and `change-path` - so it still means something to someone
@@ -443,7 +443,7 @@ node --env-file=.env watchdog.mjs --expected-days 7
   missing log counts as stale rather than as nothing to report
 - it also reads the backup timestamp: a successful `--expect-file` run leaves
   `verifiedAt` in `.wallet-verify-state.json`, and a missing timestamp or one
-  older than `--wallet-months` (default 6) is stale too - the drill that is done
+  older than `--wallet-days` (default 180) is stale too - the drill that is done
   once and never repeated is the failure this catches
 - nothing is written: this tool only reads the log and that state file, so it is
   safe to run often
@@ -576,6 +576,12 @@ day the run happens. `--audit PATH` points at another log, and `--state` records
 the posted week so a retry for the same week skips unless `--force` is passed; a
 failed post leaves it untouched so the next run retries. With no webhook
 configured it logs a skip once per ISO week and exits 0.
+
+Each message ends with a *Backup check* line - when the wallet was last verified
+against its fingerprint, and how many days ago - read from the same
+`.wallet-verify-state.json` the watchdog uses (`--wallet-state PATH` for another
+location). The point is to see the number climbing: the watchdog only speaks up
+at 180 days, which is the wrong moment to learn the age for the first time.
 
 On Windows, `run-weekly.cmd` posts it and logs to `treasury-weekly.log`;
 `register-weekly.ps1` registers the Monday task with three triggers (08:30,

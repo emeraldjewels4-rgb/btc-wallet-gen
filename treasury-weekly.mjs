@@ -16,6 +16,7 @@
  * week, so a retry for the same week is a no-op unless --force is passed.
  */
 
+import { BACKUP_STATE_DEFAULT, readBackupState } from './backup-state.mjs';
 import { createSlackNotifier, resolveWebhook } from './notify.mjs';
 import {
   DAY_MS,
@@ -46,6 +47,8 @@ Options:
   --webhook-file PATH   read the webhook URL from this file (wins over .env)
   --force               post even if this week was already posted
   --state PATH          state file for the once-per-week guard (default ${STATE_DEFAULT})
+  --wallet-state PATH   backup timestamp reported in the message (default
+                        ${BACKUP_STATE_DEFAULT})
   -h, --help            show this help
 
 Environment:
@@ -63,6 +66,7 @@ function parseArgs(argv) {
     force: false,
     state: STATE_DEFAULT,
     webhookFile: null,
+    walletState: BACKUP_STATE_DEFAULT,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -89,6 +93,8 @@ function parseArgs(argv) {
       opts.force = true;
     } else if (arg === '--state') {
       opts.state = next();
+    } else if (arg === '--wallet-state') {
+      opts.walletState = next();
     } else {
       fail(`unknown argument "${arg}" (try --help)`);
     }
@@ -107,6 +113,20 @@ function isoWeekOf(ms) {
   const week1Monday = jan4 - jan4Weekday * DAY_MS;
   const week = Math.floor((ms - week1Monday) / WEEK_MS) + 1;
   return { year, week };
+}
+
+// Reported every week, not only once it has lapsed: an age that is seen climbing
+// is a reminder, while an age first seen at the alert is a surprise. The 180-day
+// verdict belongs to watchdog.mjs; this line only says how long it has been.
+function backupText(path, now = Date.now()) {
+  const { status, verifiedAt } = readBackupState(path);
+  if (status === 'missing') {
+    return '- no backup verification recorded yet - run node wallet.mjs --restore --expect-file <record> < seed.txt';
+  }
+  if (status === 'unreadable') {
+    return `- ${path} is unreadable - re-run the restore check to rewrite it`;
+  }
+  return `- last verified ${new Date(verifiedAt).toISOString().slice(0, 10)} (${((now - verifiedAt) / DAY_MS).toFixed(1)} days ago)`;
 }
 
 function weekLabel({ year, week }) {
@@ -210,6 +230,9 @@ async function main() {
     `*Trend vs previous week (${previousLabel}, ` +
       `${isoDay(previousFrom)} to ${isoDay(previousTo - DAY_MS)})*`,
     ...(trendLines.length > 0 ? trendLines : ['- no refills in either week']),
+    '',
+    '*Backup check*',
+    backupText(opts.walletState),
   ].join('\n');
 
   console.log(message);

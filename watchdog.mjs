@@ -26,17 +26,15 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs';
+import { BACKUP_STATE_DEFAULT, readBackupState } from './backup-state.mjs';
 import { createSlackNotifier, resolveSlackWebhooks } from './notify.mjs';
 
 const AUDIT_DEFAULT = 'refill-audit.jsonl';
-const WALLET_STATE_DEFAULT = '.wallet-verify-state.json';
 const DAY_MS = 24 * 60 * 60 * 1000;
-// Months are counted as 30 days: the exact length decides nothing here, and a
-// calendar would only invite arguments about which one.
-const MONTH_DAYS = 30;
-// Longer than a quarterly review, short enough that a lapse is caught while the
-// backup material can still be found.
-const WALLET_MONTHS_DEFAULT = 6;
+// Twice a year: longer than a quarterly review, short enough that a lapse is
+// caught while the backup material can still be found. Days, like --expected-days,
+// so the tool has one unit.
+const WALLET_DAYS_DEFAULT = 180;
 // "About 1.5 intervals" leaves room for one missed run plus clock and timezone
 // drift, and still reports a switch-off machine within two weeks of a weekly job.
 const STALE_FACTOR = 1.5;
@@ -64,9 +62,10 @@ Options:
   --expected-days N   how often a run is expected (default 7); the alert fires
                       past ${STALE_FACTOR} x this, so 10.5 days by default
   --wallet-state PATH  timestamp left by a successful wallet --expect-file run
-                      (default ${WALLET_STATE_DEFAULT})
-  --wallet-months N   how often the backup should be checked (default
-                      ${WALLET_MONTHS_DEFAULT}); a missing or older timestamp is stale
+                      (default ${BACKUP_STATE_DEFAULT})
+  --wallet-days N     how often the backup should be checked, in days (default
+                      ${WALLET_DAYS_DEFAULT}); a missing timestamp, or one older than
+                      this, is stale just like the log is
   -h, --help          show this help
 
 Environment:
@@ -82,8 +81,8 @@ function parseArgs(argv) {
   const opts = {
     audits: [],
     expectedDays: 7,
-    walletState: WALLET_STATE_DEFAULT,
-    walletMonths: WALLET_MONTHS_DEFAULT,
+    walletState: BACKUP_STATE_DEFAULT,
+    walletDays: WALLET_DAYS_DEFAULT,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -109,13 +108,13 @@ function parseArgs(argv) {
       opts.expectedDays = days;
     } else if (arg === '--wallet-state') {
       opts.walletState = next();
-    } else if (arg === '--wallet-months') {
+    } else if (arg === '--wallet-days') {
       const raw = next();
-      const months = Number(raw);
-      if (!Number.isFinite(months) || months <= 0 || months > 120) {
-        fail(`--wallet-months expects a positive number of months, got "${raw}"`);
+      const walletDays = Number(raw);
+      if (!Number.isFinite(walletDays) || walletDays <= 0 || walletDays > 3650) {
+        fail(`--wallet-days expects a positive number of days, got "${raw}"`);
       }
-      opts.walletMonths = months;
+      opts.walletDays = walletDays;
     } else {
       fail(`unknown argument "${arg}" (try --help)`);
     }
@@ -166,9 +165,10 @@ function days(ms) {
 // A backup check that is never repeated is only presumed good, and the record it
 // was checked against drifts out of memory first. Reports the age of the last
 // successful wallet --expect-file run.
-function backupState(path, months, now) {
-  const limitMs = months * MONTH_DAYS * DAY_MS;
-  if (!existsSync(path)) {
+function backupState(path, limitDays, now) {
+  const limitMs = limitDays * DAY_MS;
+  const { status, verifiedAt } = readBackupState(path);
+  if (status === 'missing') {
     return {
       ok: false,
       message:
@@ -176,14 +176,7 @@ function backupState(path, months, now) {
         'node wallet.mjs --restore --expect-file <record> < seed.txt',
     };
   }
-
-  let verifiedAt = null;
-  try {
-    verifiedAt = Date.parse(JSON.parse(readFileSync(path, 'utf8')).verifiedAt);
-  } catch {
-    verifiedAt = null;
-  }
-  if (!Number.isFinite(verifiedAt)) {
+  if (status === 'unreadable') {
     return { ok: false, message: `${path} has no readable verifiedAt - re-run the restore check to rewrite it` };
   }
 
@@ -193,7 +186,7 @@ function backupState(path, months, now) {
       ok: false,
       message:
         `the backup was last verified ${new Date(verifiedAt).toISOString()} (${days(ageMs)} days ago) - ` +
-        `check it at least every ${months} month(s)`,
+        `check it at least every ${limitDays} day(s)`,
     };
   }
   return {
@@ -211,7 +204,7 @@ async function main() {
   const limitMs = opts.expectedDays * DAY_MS * STALE_FACTOR;
   const age = newest === null ? null : now - newest;
   const where = opts.audits.join(', ');
-  const fresh = age !== null && age <= limitMs;
+  const auditStale = age === null || age > limitMs;
 
   const summary = [`${opts.audits.length} log(s)`, `${entries} entr${entries === 1 ? 'y' : 'ies'}`];
   if (unreadable) summary.push(`${unreadable} unreadable line(s)`);
@@ -219,26 +212,25 @@ async function main() {
   log(notifier.describe());
   log(summary.join(', '));
 
-  const reasons = [];
-  if (fresh) {
-    log(
-      `ok: newest entry ${new Date(newest).toISOString()} (${days(age)} days ago); ` +
-        `expected every ${opts.expectedDays} day(s), stale past ${days(limitMs)}`,
-    );
-  } else {
-    reasons.push(
-      age === null
-        ? `no refill activity is recorded in ${where} - the log is missing, empty or has no ` +
-          'readable entry, so no scheduled run has reached it'
-        : `nothing recorded since ${new Date(newest).toISOString()} (${days(age)} days ago), ` +
+  const auditMessage =
+    age === null
+      ? `no refill activity is recorded in ${where} - the log is missing, empty or has no ` +
+        'readable entry, so no scheduled run has reached it'
+      : auditStale
+        ? `nothing recorded since ${new Date(newest).toISOString()} (${days(age)} days ago), ` +
           `and a run is expected every ${opts.expectedDays} day(s) - anything older than ` +
-          `${days(limitMs)} days means the schedule stopped`,
-    );
-  }
+          `${days(limitMs)} days means the schedule stopped`
+        : `newest entry ${new Date(newest).toISOString()} (${days(age)} days ago); ` +
+          `expected every ${opts.expectedDays} day(s), stale past ${days(limitMs)}`;
 
-  const backup = backupState(opts.walletState, opts.walletMonths, now);
-  if (backup.ok) log(`ok: ${backup.message}`);
-  else reasons.push(backup.message);
+  const backup = backupState(opts.walletState, opts.walletDays, now);
+
+  // Both checks have the same shape: say it when it is fine, collect it when it
+  // is not, and report everything collected in one place.
+  const reasons = [];
+  const report = (ok, message) => (ok ? log(`ok: ${message}`) : reasons.push(message));
+  report(!auditStale, auditMessage);
+  report(backup.ok, backup.message);
 
   if (reasons.length === 0) return;
 
@@ -252,7 +244,7 @@ async function main() {
         ...reasons,
         `log ${where}${missing.length ? ` (missing: ${missing.join(', ')})` : ''}`,
         `expected every ${opts.expectedDays} day(s) | alerts past ${days(limitMs)} days`,
-        `backup ${opts.walletState} | checked at least every ${opts.walletMonths} month(s)`,
+        `backup ${opts.walletState} | checked at least every ${opts.walletDays} day(s)`,
         'severity high',
       ].join('\n'),
     );

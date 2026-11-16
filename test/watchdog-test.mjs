@@ -147,20 +147,20 @@ try {
   check('a recently verified backup exits 0', run.code === 0, `exit ${run.code}: ${run.out.trim()}`);
   check('and reports when it was verified', /ok: backup verified 0\.0 days ago/.test(run.out), run.out.trim());
 
-  freshBackup(now - 8 * 30 * DAY);
+  freshBackup(now - 240 * DAY);
   run = await runWatchdog(['--audit', log, '--expected-days', '7']);
   check('a backup unchecked for eight months exits 3', run.code === 3, `exit ${run.code}`);
   check('it says when it was last verified', /last verified .*\(240\.0 days ago\)/.test(run.out), run.out.trim());
-  check('and how often it should be checked', /at least every 6 month\(s\)/.test(run.out), run.out.trim());
+  check('and how often it should be checked', /at least every 180 day\(s\)/.test(run.out), run.out.trim());
   check('the alert carries the backup reason', /last verified/.test(slack.messages.at(-1)?.text ?? ''), slack.messages.at(-1)?.text);
   check('the alert names the state file', (slack.messages.at(-1)?.text ?? '').includes(WALLET_STATE));
 
-  run = await runWatchdog(['--audit', log, '--expected-days', '7', '--wallet-months', '12']);
-  check('--wallet-months widens the window', run.code === 0, `exit ${run.code}: ${run.out.trim()}`);
+  run = await runWatchdog(['--audit', log, '--expected-days', '7', '--wallet-days', '365']);
+  check('--wallet-days widens the window', run.code === 0, `exit ${run.code}: ${run.out.trim()}`);
 
-  freshBackup(now - 2 * 30 * DAY);
-  run = await runWatchdog(['--audit', log, '--expected-days', '7', '--wallet-months', '1']);
-  check('--wallet-months narrows it too', run.code === 3, `exit ${run.code}`);
+  freshBackup(now - 60 * DAY);
+  run = await runWatchdog(['--audit', log, '--expected-days', '7', '--wallet-days', '30']);
+  check('--wallet-days narrows it too', run.code === 3, `exit ${run.code}`);
 
   freshBackup(now);
   const never = join(DIR, 'never-verified.json');
@@ -178,8 +178,8 @@ try {
   check('an unreadable state file exits 3', run.code === 3, `exit ${run.code}`);
   check('and says the timestamp is unreadable', /no readable verifiedAt/.test(run.out), run.out.trim());
 
-  const badMonths = await runWatchdog(['--wallet-months', '0']);
-  check('--wallet-months must be positive', badMonths.code === 1, `exit ${badMonths.code}`);
+  const badWalletDays = await runWatchdog(['--wallet-days', '0']);
+  check('--wallet-days must be positive', badWalletDays.code === 1, `exit ${badWalletDays.code}`);
 
   console.log('\n== arguments ==');
   const badDays = await runWatchdog(['--expected-days', '0']);
