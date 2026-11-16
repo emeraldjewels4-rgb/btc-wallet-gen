@@ -27,7 +27,7 @@
  * echo - the environment is last because other processes can read it.
  */
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { generateMnemonic, mnemonicToSeedSync, validateMnemonic } from 'bip39';
 import { HDKey } from '@scure/bip32';
@@ -70,6 +70,8 @@ function usage() {
   --show-key    also print the WIF private key for address #0; to a terminal it
                 refuses unless --allow-tty is passed
   --allow-tty   print that private key to the terminal anyway
+  --out PATH    write what --show-key or --phrase-only would print to PATH
+                instead, created 0600 and never overwritten
   --verify-state PATH
                 where a successful --expect-file records its timestamp, for
                 watchdog.mjs (default ${VERIFY_STATE})
@@ -110,6 +112,7 @@ function parseArgs(argv) {
     showKey: false,
     allowTty: false,
     passphraseFile: null,
+    out: null,
     verifyState: VERIFY_STATE,
     restore: false,
     phraseOnly: false,
@@ -127,6 +130,11 @@ function parseArgs(argv) {
       opts.showKey = true;
     } else if (arg === '--allow-tty') {
       opts.allowTty = true;
+    } else if (arg === '--out') {
+      const value = argv[i + 1];
+      if (value === undefined || value === '') fail('--out needs a path');
+      opts.out = value;
+      i += 1;
     } else if (arg === '--passphrase-file') {
       const value = argv[i + 1];
       if (value === undefined || value === '') fail('--passphrase-file needs a path');
@@ -193,6 +201,10 @@ function parseArgs(argv) {
   if (opts.phraseOnly && (opts.restore || opts.xpub !== null || opts.showKey || opts.fingerprint !== null)) {
     fail('--phrase-only writes a new seed phrase and nothing else, so it cannot be combined with --restore, --xpub, --show-key or --fingerprint');
   }
+  if (opts.out !== null && !opts.showKey && !opts.phraseOnly) {
+    fail('--out writes the secret that --show-key or --phrase-only would print, so it needs one of them');
+  }
+
   return opts;
 }
 
@@ -515,6 +527,28 @@ function resolveExpectation(expectation, { account, receive, change, passphrase 
   }
 }
 
+// A redirect writes wherever the shell's umask or Windows ACLs put it. --out is
+// the file the tool creates itself: owner-only where the platform has modes, and
+// never over an existing file - overwriting an old backup silently destroys it.
+function writeSecret(path, text) {
+  try {
+    writeFileSync(path, text, { flag: 'wx', mode: 0o600 });
+  } catch (err) {
+    if (err.code === 'EEXIST') {
+      fail(`${path} already exists - --out never overwrites; choose a new path or remove it first`);
+    }
+    fail(`cannot write ${path}: ${err.message}`);
+  }
+  // Ask the filesystem rather than trust the request: Windows ignores the mode,
+  // and saying "owner-only" there would be a promise the file does not keep.
+  const mode = statSync(path).mode & 0o777;
+  console.log(
+    (mode & 0o077) === 0
+      ? `Wrote ${path} (0600: owner only).`
+      : `Wrote ${path}, but this platform kept the folder's permissions (mode ${mode.toString(8)}): keep it on an encrypted volume.`,
+  );
+}
+
 // A backup check that is never repeated is only presumed good. Record when it
 // last succeeded; a failed one leaves the old timestamp alone rather than
 // pretending the drill happened.
@@ -629,10 +663,12 @@ async function main() {
   // accepted; --show-key can be pressed past with --allow-tty, but a phrase is
   // never printed to a terminal.
   if (process.stdout.isTTY) {
-    if (opts.phraseOnly) {
+    // With --out the secret goes to a file the tool made, not to the terminal,
+    // so these refusals have nothing left to protect.
+    if (opts.phraseOnly && opts.out === null) {
       fail('--phrase-only refuses to print the seed phrase to a terminal - redirect it, e.g. node wallet.mjs --phrase-only > seed.txt');
     }
-    if (opts.showKey && !opts.allowTty) {
+    if (opts.showKey && !opts.allowTty && opts.out === null) {
       fail('--show-key would print a private key to this terminal - redirect the output, or pass --allow-tty to print it anyway');
     }
   }
@@ -676,7 +712,9 @@ async function main() {
         'note: BIP39_PASSPHRASE is set, so this phrase alone restores a different wallet\n',
       );
     }
-    process.stdout.write(`${generateMnemonic(256)}\n`);
+    const phrase = generateMnemonic(256);
+    if (opts.out !== null) writeSecret(opts.out, `${phrase}\n`);
+    else process.stdout.write(`${phrase}\n`);
     return;
   }
 
@@ -738,9 +776,13 @@ async function main() {
       privateKey: Buffer.from(child.privateKey),
       compressed: true,
     });
-    console.log('');
-    console.log(`Private key (WIF) for #0 ${address}:`);
-    console.log(`  ${key}`);
+    if (opts.out !== null) {
+      writeSecret(opts.out, `${key}\n`);
+    } else {
+      console.log('');
+      console.log(`Private key (WIF) for #0 ${address}:`);
+      console.log(`  ${key}`);
+    }
   }
 
   console.log('');

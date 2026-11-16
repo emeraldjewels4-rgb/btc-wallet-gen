@@ -11,7 +11,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -222,6 +222,67 @@ check('the refusal prints no phrase', run.stdout === '', JSON.stringify(run.stdo
 
 run = await runWallet(['--phrase-only', '--xpub', accountXpub]);
 check('--phrase-only with --xpub exits 1', run.code === 1, `exit ${run.code}`);
+
+console.log('\n== writing a secret to a file instead of a redirect ==');
+const secretDir = mkdtempSync(join(tmpdir(), 'wallet-out-'));
+const phrasePath = join(secretDir, 'backup.txt');
+
+run = await runWallet(['--phrase-only', '--out', phrasePath]);
+check('--phrase-only --out exits 0', run.code === 0, `exit ${run.code}: ${run.out}`);
+const written = readFileSync(phrasePath, 'utf8');
+const writtenPhrase = written.trim();
+check('it writes the 24 words', writtenPhrase.split(' ').length === 24, writtenPhrase);
+check(
+  'and no word of them reaches stdout',
+  !run.stdout.includes(writtenPhrase.split(' ')[0]),
+  run.stdout,
+);
+check('it says where it wrote', run.stdout.includes(phrasePath), run.stdout);
+
+const mode = statSync(phrasePath).mode & 0o777;
+if (process.platform === 'win32') {
+  check(
+    'on Windows it says the folder permissions apply',
+    /kept the folder's permissions/.test(run.stdout),
+    run.stdout,
+  );
+} else {
+  check('the file is created owner-only', mode === 0o600, mode.toString(8));
+}
+
+const restored = await runWallet(['--restore', '--count', '1'], writtenPhrase);
+check(
+  'the written phrase restores the wallet it came from',
+  restored.out.includes(addressFor(writtenPhrase, '')),
+  restored.out,
+);
+
+run = await runWallet(['--phrase-only', '--out', phrasePath]);
+check('writing it again exits 1', run.code === 1, `exit ${run.code}`);
+check('it refuses to overwrite', /already exists - --out never overwrites/.test(run.out), run.out.trim());
+check('and the first file is untouched', readFileSync(phrasePath, 'utf8') === written);
+
+const keyPath = join(secretDir, 'key.wif');
+const printedKey = await runWallet(['--restore', '--show-key', '--count', '1'], VECTOR);
+const printedWif = (printedKey.stdout.match(/^ {2}([KL5][1-9A-HJ-NP-Za-km-z]{50,51})$/m) ?? [])[1] ?? '';
+run = await runWallet(['--restore', '--show-key', '--count', '1', '--out', keyPath], VECTOR);
+check('--show-key --out exits 0', run.code === 0, `exit ${run.code}: ${run.out}`);
+check('it writes the same WIF the report prints', readFileSync(keyPath, 'utf8').trim() === printedWif, printedWif);
+check('and keeps the WIF out of its own output', !run.out.includes(printedWif), run.out);
+
+run = await runWallet(['--out', join(secretDir, 'nowhere.txt')]);
+check('--out alone exits 1', run.code === 1, `exit ${run.code}`);
+check('and says what it needs', /needs one of them/.test(run.out), run.out.trim());
+
+const terminalPath = join(secretDir, 'terminal.txt');
+const onTerminal = await runWalletOnTerminal(['--phrase-only', '--out', terminalPath]);
+check('a terminal accepts --phrase-only --out', onTerminal.code === 0, `exit ${onTerminal.code}: ${onTerminal.out}`);
+check(
+  'because the phrase goes to the file, not the screen',
+  !onTerminal.stdout.includes(readFileSync(terminalPath, 'utf8').trim().split(' ')[0]),
+  onTerminal.stdout,
+);
+rmSync(secretDir, { recursive: true, force: true });
 
 console.log('\n== change chain ==');
 // Derived here from the same seed with the same libraries, independently of the

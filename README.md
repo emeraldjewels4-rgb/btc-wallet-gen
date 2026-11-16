@@ -37,6 +37,21 @@ That file restores directly with `node wallet.mjs --restore < seed.txt`.
 `--phrase-only` refuses to run when stdout is a terminal, because printing the
 phrase there is what the flag exists to prevent; give it a redirect or a pipe.
 
+A redirect lands wherever the shell's umask puts it, so `--out` writes the file
+itself instead:
+
+```sh
+node wallet.mjs --phrase-only --out /path/to/seed.txt
+node wallet.mjs --restore --show-key --out /path/to/key.wif < seed.txt
+```
+
+`--out` creates the file rather than truncating one, so an existing backup is
+never silently replaced (exit `1`), and asks for mode `0600`. On POSIX that is
+what you get; on Windows the mode is ignored and the file inherits the folder's
+permissions - the tool says so when it writes, and means the file belongs on an
+encrypted volume there. Nothing of the secret reaches stdout, so `--out` is also
+how you do this at a terminal, where `--phrase-only` otherwise refuses.
+
 ## Restore an existing seed phrase
 
 Derives the addresses an existing BIP-84 wallet uses for the same phrase,
@@ -145,7 +160,8 @@ half-read. Older records without those lines still verify normally.
 | `--count N` | how many addresses to cover, 1-20: printed (default 1), or recorded and searched by `--fingerprint` and `--expect` (default 5) |
 | `--show-key` | also print the WIF private key for address #0; refused when stdout is a terminal unless `--allow-tty` is passed |
 | `--allow-tty` | print that private key to a terminal anyway |
-| `--phrase-only` | print only the new seed phrase on stdout, so a redirect is a restorable backup; generation only, never with `--show-key`, and refuses to run when stdout is a terminal |
+| `--phrase-only` | print only the new seed phrase on stdout, so a redirect is a restorable backup; generation only, never with `--show-key`, and refuses to run when stdout is a terminal unless `--out` is given |
+| `--out PATH` | write what `--show-key` or `--phrase-only` would print to `PATH`: created rather than truncated, mode `0600` |
 | `--expect VALUE` | compare a restore against an xpub or address recorded earlier; needs `--restore`, exits 3 on a mismatch |
 | `--fingerprint PATH` | write the account, receive-chain and change-chain xpubs plus the first five addresses (or `--count N`) to `PATH` as a public record (`-` for stdout) |
 | `--expect-file PATH` | compare a restore against that record; needs `--restore`, exits 3 on a mismatch, and records the timestamp on success |
