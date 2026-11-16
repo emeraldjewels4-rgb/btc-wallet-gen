@@ -31,6 +31,7 @@ import { readFileSync, statSync, writeFileSync } from 'node:fs';
 import { BACKUP_STATE_DEFAULT, recordDigest } from './backup-state.mjs';
 import { createInterface } from 'node:readline/promises';
 import { resolve } from 'node:path';
+import { spendProof } from './spend-check.mjs';
 import { generateMnemonic, mnemonicToSeedSync, validateMnemonic } from 'bip39';
 import { HDKey } from '@scure/bip32';
 import * as bitcoin from 'bitcoinjs-lib';
@@ -69,6 +70,9 @@ function usage() {
   --show-key    also print the WIF private key for address #0; to a terminal it
                 refuses unless --allow-tty is passed
   --allow-tty   print that private key to the terminal anyway
+  --spend-check prove a restored backup can spend, not only derive: sign a spend
+                of address #0 offline, verify the signature and discard it; needs
+                --restore, and sends nothing to the network
   --out PATH    write what --show-key or --phrase-only would print to PATH
                 instead, created 0600 and never overwritten
   --verify-state PATH
@@ -110,6 +114,7 @@ function parseArgs(argv) {
     count: null,
     showKey: false,
     allowTty: false,
+    spendCheck: false,
     passphraseFile: null,
     out: null,
     // Where a successful --expect-file run leaves its timestamp; watchdog.mjs
@@ -131,6 +136,8 @@ function parseArgs(argv) {
       opts.showKey = true;
     } else if (arg === '--allow-tty') {
       opts.allowTty = true;
+    } else if (arg === '--spend-check') {
+      opts.spendCheck = true;
     } else if (arg === '--out') {
       const value = argv[i + 1];
       if (value === undefined || value === '') fail('--out needs a path');
@@ -201,6 +208,9 @@ function parseArgs(argv) {
   }
   if (opts.phraseOnly && (opts.restore || opts.xpub !== null || opts.showKey || opts.fingerprint !== null)) {
     fail('--phrase-only writes a new seed phrase and nothing else, so it cannot be combined with --restore, --xpub, --show-key or --fingerprint');
+  }
+  if (opts.spendCheck && !opts.restore) {
+    fail('--spend-check proves a restored backup can spend, so it needs --restore');
   }
   if (opts.out !== null && !opts.showKey && !opts.phraseOnly) {
     fail('--out writes the secret that --show-key or --phrase-only would print, so it needs one of them');
@@ -800,6 +810,22 @@ async function main() {
       console.log('');
       console.log(`Private key (WIF) for #0 ${address}:`);
       console.log(`  ${key}`);
+    }
+  }
+
+  // Deriving the same address is not the same as being able to move from it, and
+  // the difference only shows up on the day the backup is needed.
+  if (opts.spendCheck) {
+    const { address, child } = addressAt(receive, 0);
+    const proof = spendProof({ child, address, network: NETWORK });
+    console.log('');
+    if (proof.ok) {
+      console.log(`Spend check: the key for #0 ${address} signed a spend of it, and the signature verifies.`);
+      console.log('  The transaction was discarded and nothing was broadcast: this backup can spend, not only derive.');
+    } else {
+      console.error(`error: the restored key cannot spend address #0 ${address} - ${proof.reason}`);
+      console.error('  do not fund this wallet: a backup that cannot sign for its own address cannot rescue it');
+      process.exitCode = EXIT_MISMATCH;
     }
   }
 

@@ -14,6 +14,7 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { spendProof } from '../spend-check.mjs';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HDKey } from '@scure/bip32';
@@ -284,6 +285,66 @@ check(
   onTerminal.stdout,
 );
 rmSync(secretDir, { recursive: true, force: true });
+
+console.log('\n== proving the key can spend ==');
+run = await runWallet(['--restore', '--spend-check'], VECTOR);
+check('--restore --spend-check exits 0', run.code === 0, `exit ${run.code}: ${run.out}`);
+check(
+  'it says the key signed for address #0',
+  run.out.includes(`Spend check: the key for #0 ${EXPECTED_0} signed a spend of it, and the signature verifies`),
+  run.out,
+);
+check('and that nothing was broadcast', /discarded and nothing was broadcast/.test(run.out), run.out);
+check(
+  'no private key reaches that output',
+  // A WIF is printed on its own indented line; an xpub contains runs that would
+  // otherwise look like one.
+  !/^\s+[KL5][1-9A-HJ-NP-Za-km-z]{50,51}$/m.test(run.out) && !/xprv/.test(run.out),
+  run.out,
+);
+
+run = await runWallet(['--spend-check'], VECTOR);
+check('without --restore it exits 1', run.code === 1, `exit ${run.code}`);
+check('and says the check needs one', /needs --restore/.test(run.out), run.out.trim());
+
+// The drill is the record check and the spend proof together.
+run = await runWallet(['--restore', '--expect', EXPECTED_0, '--spend-check'], VECTOR);
+check(
+  'the drill runs both and exits 0',
+  run.code === 0 && /Verified: the restored wallet matches/.test(run.out) && /Spend check:/.test(run.out),
+  run.out,
+);
+
+// The module answers "no" rather than throwing, and the signature step is what
+// makes the answer about spending rather than about deriving.
+const derivation = (phrase) => HDKey.fromMasterSeed(mnemonicToSeedSync(phrase, '')).derive("m/84'/0'/0'").deriveChild(0).deriveChild(0);
+const vectorChild = derivation(VECTOR);
+const foreignChild = derivation('legal winner thank year wave sausage worth useful legal winner thank yellow');
+const foreignAddress = bitcoin.payments.p2wpkh({ pubkey: Buffer.from(foreignChild.publicKey), network: bitcoin.networks.bitcoin }).address;
+
+let proof = spendProof({ child: vectorChild, address: EXPECTED_0, network: bitcoin.networks.bitcoin });
+check('the key behind the address produces a proof', proof.ok === true, JSON.stringify(proof));
+
+proof = spendProof({ child: foreignChild, address: EXPECTED_0, network: bitcoin.networks.bitcoin });
+check('a key that does not control the address is refused', proof.ok === false, JSON.stringify(proof));
+check(
+  'and the reason names both addresses',
+  (proof.reason ?? '').includes(EXPECTED_0) && (proof.reason ?? '').includes(foreignAddress),
+  proof.reason,
+);
+
+// A signer claiming the right address while holding another key: the address
+// check passes and only the signature check catches it.
+proof = spendProof({
+  child: { publicKey: vectorChild.publicKey, privateKey: foreignChild.privateKey },
+  address: EXPECTED_0,
+  network: bitcoin.networks.bitcoin,
+});
+check(
+  'a signature from the wrong key fails verification',
+  proof.ok === false && /does not verify/.test(proof.reason ?? ''),
+  JSON.stringify(proof),
+);
 
 console.log('\n== the recovery runbook ==');
 const recovery = readFileSync(join(ROOT, 'RECOVERY.md'), 'utf8');

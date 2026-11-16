@@ -153,6 +153,20 @@ the new contents. A record that cannot be read at all is not treated as changed:
 keeping it on the off-line machine is a legitimate arrangement, so the hash only
 speaks when both sides are present.
 
+Deriving an address is not the same as being able to move from it, and the
+difference stays invisible until the day the backup is needed. `--spend-check`
+signs a p2wpkh spend of address `#0` with the restored key, verifies that
+signature against the script the address itself commits to, and throws the
+transaction away: no network, no fee, nothing written. Run it as part of the
+drill:
+
+```sh
+node wallet.mjs --restore --expect-file wallet-fingerprint.txt --spend-check < seed.txt
+```
+
+A key that cannot sign for its own address exits `3` and says not to fund the
+wallet - the case a derivation check cannot tell apart from a good backup.
+
 The record states its own derivation - `path` (`m/84'/0'/0'`), `coin` (`0`),
 `receive-path` and `change-path` - so it still means something to someone
 without this tool. [`RECOVERY.md`](RECOVERY.md) is the runbook for that case:
@@ -174,6 +188,7 @@ half-read. Older records without those lines still verify normally.
 | `--count N` | how many addresses to cover, 1-20: printed (default 1), or recorded and searched by `--fingerprint` and `--expect` (default 5) |
 | `--show-key` | also print the WIF private key for address #0; refused when stdout is a terminal unless `--allow-tty` is passed |
 | `--allow-tty` | print that private key to a terminal anyway |
+| `--spend-check` | prove a restored backup can spend, not only derive: sign a spend of address #0 offline, verify the signature, discard the transaction; needs `--restore`, exits 3 if the key cannot sign |
 | `--phrase-only` | print only the new seed phrase on stdout, so a redirect is a restorable backup; generation only, never with `--show-key`, and refuses to run when stdout is a terminal unless `--out` is given |
 | `--out PATH` | write what `--show-key` or `--phrase-only` would print to `PATH`: created rather than truncated, mode `0600` |
 | `--expect VALUE` | compare a restore against an xpub or address recorded earlier; needs `--restore`, exits 3 on a mismatch |
