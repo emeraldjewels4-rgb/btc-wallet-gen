@@ -11,9 +11,10 @@
  */
 
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HDKey } from '@scure/bip32';
 import * as bitcoin from 'bitcoinjs-lib';
@@ -752,6 +753,14 @@ check(
   JSON.stringify(state),
 );
 check('and the record it verified', state.record === localRecord, JSON.stringify(state));
+// Hashed here rather than by the tool, so a hash of the wrong bytes shows up.
+const recordDigestOf = (path) => `sha256:${createHash('sha256').update(readFileSync(path, 'utf8')).digest('hex')}`;
+check('and the hash of the record it verified', state.recordHash === recordDigestOf(localRecord), JSON.stringify(state));
+check(
+  'the record path is absolute, so a later run from another directory finds it',
+  isAbsolute(state.record),
+  state.record,
+);
 check('it says where it recorded it', run.out.includes(`Recorded in ${statePath}`), run.out);
 
 const failedState = join(verifyDir, 'failed-state.json');
@@ -763,6 +772,15 @@ const planted = JSON.stringify({ verifiedAt: '2020-01-01T00:00:00.000Z', record:
 writeFileSync(statePath, planted);
 run = await runWallet(['--restore', '--expect', accountXpub, '--verify-state', statePath], VECTOR);
 check('a bare --expect does not touch the state file', readFileSync(statePath, 'utf8') === planted, readFileSync(statePath, 'utf8'));
+
+// Editing the record makes that green light stale; running the drill again pins
+// the contents that were actually checked.
+const beforeRepin = JSON.parse(readFileSync(statePath, 'utf8')).recordHash;
+appendFileSync(localRecord, '# a note added after the check\n');
+run = await runWallet(['--restore', '--expect-file', localRecord, '--verify-state', statePath], VECTOR);
+check('checking the edited record again still exits 0', run.code === 0, `exit ${run.code}: ${run.out}`);
+const repinned = JSON.parse(readFileSync(statePath, 'utf8')).recordHash;
+check('and pins its new contents', repinned !== beforeRepin && repinned === recordDigestOf(localRecord), repinned);
 rmSync(verifyDir, { recursive: true, force: true });
 
 console.log('\n== --expect misuse ==');

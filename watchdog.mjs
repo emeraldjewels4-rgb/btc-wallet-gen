@@ -26,7 +26,7 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs';
-import { BACKUP_STATE_DEFAULT, readBackupState } from './backup-state.mjs';
+import { BACKUP_STATE_DEFAULT, readBackupState, recordState } from './backup-state.mjs';
 import { createSlackNotifier, resolveSlackWebhooks } from './notify.mjs';
 
 const AUDIT_DEFAULT = 'refill-audit.jsonl';
@@ -167,7 +167,7 @@ function days(ms) {
 // successful wallet --expect-file run.
 function backupState(path, limitDays, now) {
   const limitMs = limitDays * DAY_MS;
-  const { status, verifiedAt } = readBackupState(path);
+  const { status, verifiedAt, record, recordHash } = readBackupState(path);
   if (status === 'missing') {
     return {
       ok: false,
@@ -178,6 +178,16 @@ function backupState(path, limitDays, now) {
   }
   if (status === 'unreadable') {
     return { ok: false, message: `${path} has no readable verifiedAt - re-run the restore check to rewrite it` };
+  }
+
+  // The green light was given for one record. If that record has been edited
+  // since, the light is for something nobody checked, which matters more than
+  // how long ago it was - re-running the drill is the answer to both.
+  if (recordState({ record, recordHash }) === 'changed') {
+    return {
+      ok: false,
+      message: `the record ${record} has changed since the backup was verified - check the backup against it again`,
+    };
   }
 
   const ageMs = now - verifiedAt;

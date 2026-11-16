@@ -145,6 +145,14 @@ for more than 180 days. `--verify-state PATH` writes it somewhere else, which is
 what you want when the check is done on the off-line machine and the watchdog
 runs on another.
 
+That timestamp also pins the record's contents, by hash of the bytes that were
+compared: edit the record afterwards - add an address, fix a comment - and both
+the watchdog and the weekly line say the record has changed since, rather than
+reporting a green light for a file nobody checked. Running the drill again pins
+the new contents. A record that cannot be read at all is not treated as changed:
+keeping it on the off-line machine is a legitimate arrangement, so the hash only
+speaks when both sides are present.
+
 The record states its own derivation - `path` (`m/84'/0'/0'`), `coin` (`0`),
 `receive-path` and `change-path` - so it still means something to someone
 without this tool. [`RECOVERY.md`](RECOVERY.md) is the runbook for that case:

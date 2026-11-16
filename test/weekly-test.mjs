@@ -8,6 +8,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -260,6 +261,35 @@ try {
   writeFileSync(WALLET_STATE, 'not json');
   run = await runWeekly(['--audit', AUDIT]);
   check('an unreadable one says so', /is unreadable - re-run the restore check/.test(run.out), run.out.trim());
+
+  // The record the drill verified is pinned by hash: editing it later means the
+  // green light belongs to a file nobody checked.
+  const recordPath = join(tmpdir(), 'weekly-test-record.txt');
+  const digest = (text) => `sha256:${createHash('sha256').update(text).digest('hex')}`;
+  const recordText = 'address #0: bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu\n';
+  writeFileSync(recordPath, recordText);
+  writeFileSync(
+    WALLET_STATE,
+    JSON.stringify({ verifiedAt: new Date(Date.now() - 3 * DAY).toISOString(), record: recordPath, recordHash: digest(recordText) }),
+  );
+  run = await runWeekly(['--audit', AUDIT]);
+  check(
+    'an unchanged record reports the age plainly',
+    /last verified \d{4}-\d{2}-\d{2} \(3\.0 days ago\)/.test(run.out) && !/has changed/.test(run.out),
+    run.out.trim(),
+  );
+
+  writeFileSync(recordPath, `${recordText}# edited after the check\n`);
+  run = await runWeekly(['--audit', AUDIT]);
+  check(
+    'an edited record says so instead of a plain age',
+    /but the record has changed since - run the drill again/.test(run.out),
+    run.out.trim(),
+  );
+  rmSync(recordPath, { force: true });
+
+  run = await runWeekly(['--audit', AUDIT]);
+  check('a record that is no longer readable is not an alarm', !/has changed/.test(run.out) && /last verified/.test(run.out), run.out.trim());
 
   console.log('\n== errors ==');
   run = await runWeekly([...base, '--post']);

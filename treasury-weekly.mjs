@@ -16,7 +16,7 @@
  * week, so a retry for the same week is a no-op unless --force is passed.
  */
 
-import { BACKUP_STATE_DEFAULT, readBackupState } from './backup-state.mjs';
+import { BACKUP_STATE_DEFAULT, readBackupState, recordState } from './backup-state.mjs';
 import { createSlackNotifier, resolveWebhook } from './notify.mjs';
 import {
   DAY_MS,
@@ -119,14 +119,17 @@ function isoWeekOf(ms) {
 // is a reminder, while an age first seen at the alert is a surprise. The 180-day
 // verdict belongs to watchdog.mjs; this line only says how long it has been.
 function backupText(path, now = Date.now()) {
-  const { status, verifiedAt } = readBackupState(path);
+  const { status, verifiedAt, record, recordHash } = readBackupState(path);
   if (status === 'missing') {
     return '- no backup verification recorded yet - run node wallet.mjs --restore --expect-file <record> < seed.txt';
   }
   if (status === 'unreadable') {
     return `- ${path} is unreadable - re-run the restore check to rewrite it`;
   }
-  return `- last verified ${new Date(verifiedAt).toISOString().slice(0, 10)} (${((now - verifiedAt) / DAY_MS).toFixed(1)} days ago)`;
+  const when = `last verified ${new Date(verifiedAt).toISOString().slice(0, 10)} (${((now - verifiedAt) / DAY_MS).toFixed(1)} days ago)`;
+  return recordState({ record, recordHash }) === 'changed'
+    ? `- ${when}, but the record has changed since - run the drill again`
+    : `- ${when}`;
 }
 
 function weekLabel({ year, week }) {

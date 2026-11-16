@@ -28,8 +28,9 @@
  */
 
 import { readFileSync, statSync, writeFileSync } from 'node:fs';
-import { BACKUP_STATE_DEFAULT } from './backup-state.mjs';
+import { BACKUP_STATE_DEFAULT, recordDigest } from './backup-state.mjs';
 import { createInterface } from 'node:readline/promises';
+import { resolve } from 'node:path';
 import { generateMnemonic, mnemonicToSeedSync, validateMnemonic } from 'bip39';
 import { HDKey } from '@scure/bip32';
 import * as bitcoin from 'bitcoinjs-lib';
@@ -378,20 +379,22 @@ function parseFingerprint(text) {
 // A source becomes expectations - what to compare, and against what. Adding a
 // third source later means producing these, not another comparison and another
 // way of printing the result.
-function expectationsFor(opts) {
+function readRecord(path) {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch {
+    fail(`cannot read --expect-file ${path}`);
+  }
+}
+
+function expectationsFor(opts, recordText) {
   if (opts.expect !== null) {
     return /^[xt]pub/.test(opts.expect)
       ? [{ kind: 'xpub', value: opts.expect }]
       : [{ kind: 'address-any', value: opts.expect, limit: opts.count ?? CHECKED_ADDRESSES }];
   }
 
-  let text;
-  try {
-    text = readFileSync(opts.expectFile, 'utf8');
-  } catch {
-    fail(`cannot read --expect-file ${opts.expectFile}`);
-  }
-  const fields = parseFingerprint(text);
+  const fields = parseFingerprint(recordText);
   if (fields.version !== null && fields.version !== FINGERPRINT_VERSION) {
     fail(
       `${opts.expectFile} is fingerprint version ${fields.version}, and this tool reads version ${FINGERPRINT_VERSION}` +
@@ -559,11 +562,19 @@ function writeSecret(path, text) {
 // A backup check that is never repeated is only presumed good. Record when it
 // last succeeded; a failed one leaves the old timestamp alone rather than
 // pretending the drill happened.
-function recordVerification(path, record) {
-  const state = { verifiedAt: new Date().toISOString(), record };
+function recordVerification(path, record, recordText) {
+  // The hash covers the bytes that were checked, taken from memory rather than
+  // read again: a record swapped between the two reads would otherwise be pinned
+  // without having been verified. Absolute, so a later run from another
+  // directory still compares against the same file.
+  const state = {
+    verifiedAt: new Date().toISOString(),
+    record: resolve(record),
+    recordHash: recordDigest(recordText),
+  };
   try {
     writeFileSync(path, `${JSON.stringify(state, null, 2)}\n`);
-    console.log(`Recorded in ${path}; watchdog.mjs reports it once it goes stale.`);
+    console.log(`Recorded in ${path}; watchdog.mjs reports it once it goes stale or the record changes.`);
   } catch (err) {
     console.error(`warning: the check passed but ${path} could not be written: ${err.message}`);
   }
@@ -819,9 +830,10 @@ async function main() {
   // through the same comparison and the same report.
   if (opts.expect !== null || opts.expectFile !== null) {
     const source = opts.expectFile !== null ? `--expect-file ${opts.expectFile}` : '--expect';
-    const verdict = compareWallet({ account, receive, change, passphrase }, expectationsFor(opts));
+    const recordText = opts.expectFile !== null ? readRecord(opts.expectFile) : null;
+    const verdict = compareWallet({ account, receive, change, passphrase }, expectationsFor(opts, recordText));
     reportVerdict(verdict, source);
-    if (verdict.ok && opts.expectFile !== null) recordVerification(opts.verifyState, opts.expectFile);
+    if (verdict.ok && opts.expectFile !== null) recordVerification(opts.verifyState, opts.expectFile, recordText);
   }
 }
 

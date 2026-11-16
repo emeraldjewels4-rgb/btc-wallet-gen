@@ -8,7 +8,8 @@
  */
 
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -44,6 +45,21 @@ let slack = null;
 
 function freshBackup(verifiedAt = Date.now()) {
   writeFileSync(WALLET_STATE, JSON.stringify({ verifiedAt: new Date(verifiedAt).toISOString(), record: 'fp.txt' }));
+}
+
+// A state file that names the record it verified and pins its contents, as
+// wallet.mjs writes one. The digest is computed here, not by the tool.
+const RECORD = join(DIR, 'record.txt');
+function backupWithRecord(verifiedAt = Date.now(), contents = 'address #0: bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu\n') {
+  writeFileSync(RECORD, contents);
+  writeFileSync(
+    WALLET_STATE,
+    JSON.stringify({
+      verifiedAt: new Date(verifiedAt).toISOString(),
+      record: RECORD,
+      recordHash: `sha256:${createHash('sha256').update(contents).digest('hex')}`,
+    }),
+  );
 }
 
 // Every run gets a backup state unless the test supplies its own, so the audit
@@ -161,6 +177,30 @@ try {
   freshBackup(now - 60 * DAY);
   run = await runWatchdog(['--audit', log, '--expected-days', '7', '--wallet-days', '30']);
   check('--wallet-days narrows it too', run.code === 3, `exit ${run.code}`);
+
+  console.log('\n== an edited record is not a green light ==');
+  backupWithRecord(now);
+  run = await runWatchdog(['--audit', log, '--expected-days', '7']);
+  check('an unchanged record on a fresh verification exits 0', run.code === 0, `exit ${run.code}: ${run.out.trim()}`);
+  check('and reports it as verified', /ok: backup verified 0\.0 days ago/.test(run.out), run.out.trim());
+
+  writeFileSync(RECORD, 'address #0: bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu\n# edited\n');
+  run = await runWatchdog(['--audit', log, '--expected-days', '7']);
+  check('the same record edited afterwards exits 3', run.code === 3, `exit ${run.code}`);
+  check(
+    'and says the record changed, naming it',
+    /has changed since the backup was verified/.test(run.out) && run.out.includes(RECORD),
+    run.out.trim(),
+  );
+  check('the change beats a fresh timestamp', !/ok: backup verified/.test(run.out), run.out.trim());
+  check('and the alert carries it', /has changed since/.test(slack.messages.at(-1)?.text ?? ''), slack.messages.at(-1)?.text);
+
+  // A record on the off-line machine is a legitimate arrangement: no opinion,
+  // rather than an alarm about a file this machine was never meant to have.
+  rmSync(RECORD, { force: true });
+  run = await runWatchdog(['--audit', log, '--expected-days', '7']);
+  check('an unreadable record is not an alarm', run.code === 0, `exit ${run.code}: ${run.out.trim()}`);
+  check('and the age is still reported', /ok: backup verified/.test(run.out), run.out.trim());
 
   freshBackup(now);
   const never = join(DIR, 'never-verified.json');
