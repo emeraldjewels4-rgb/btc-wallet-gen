@@ -322,11 +322,18 @@ function fingerprintText({ account, receive, change, count, passphrase }) {
   const lines = [
     '# wallet.mjs fingerprint - public data, safe to commit: no phrase, no private key.',
     '# It does reveal these addresses and their balances to whoever reads it.',
+    '# Derivation: BIP-84 native SegWit (bech32), Bitcoin mainnet, coin 0; every',
+    '# address i is <path>/<chain>/i. See RECOVERY.md if this tool is gone.',
     '# Check a backup against it with:',
     '#   node wallet.mjs --restore --expect-file <this file> < seed.txt',
     '',
     `fingerprint-version: ${FINGERPRINT_VERSION}`,
+    // The derivation, spelled out, so the record means something to someone
+    // without this tool: address i on a chain is <chain path>/<i>.
     `path: ${COIN}`,
+    'coin: 0',
+    `receive-path: ${COIN}/${RECEIVE}`,
+    `change-path: ${COIN}/${CHANGE}`,
     // Provenance, so a later restore can be told it is missing the 25th word
     // rather than guessing that the phrase is wrong.
     `passphrase: ${passphrase ? 'required' : 'none'}`,

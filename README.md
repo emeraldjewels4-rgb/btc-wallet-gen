@@ -145,6 +145,12 @@ for six months. `--verify-state PATH` writes it somewhere else, which is what yo
 want when the check is done on the off-line machine and the watchdog runs on
 another.
 
+The record states its own derivation - `path` (`m/84'/0'/0'`), `coin` (`0`),
+`receive-path` and `change-path` - so it still means something to someone
+without this tool. [`RECOVERY.md`](RECOVERY.md) is the runbook for that case:
+phrase plus record, restored in a wallet that is not this one, checked against
+address `#0`, with the published BIP-84 vector as a self-test.
+
 The record also carries `fingerprint-version`, `path` and `passphrase`, so the
 check can say what actually went wrong: a missing 25th word is named as such
 instead of being blamed on the phrase, a record made for a different derivation

@@ -284,6 +284,25 @@ check(
 );
 rmSync(secretDir, { recursive: true, force: true });
 
+console.log('\n== the recovery runbook ==');
+const recovery = readFileSync(join(ROOT, 'RECOVERY.md'), 'utf8');
+check(
+  'it states the derivation the tool uses',
+  recovery.includes("m/84'/0'/0'/0") && recovery.includes("m/84'/0'/0'/1") && /coin type 0/.test(recovery),
+  'RECOVERY.md',
+);
+check('it names the self-test phrase', recovery.includes(VECTOR), 'RECOVERY.md');
+// The document's self-test table is a promise: it must match what this tool
+// derives, or the check it offers is worthless.
+check('the self-test receive address #0 matches', recovery.includes(`bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu`), 'RECOVERY.md');
+check('the self-test receive address #1 matches', recovery.includes(EXPECTED_1), 'RECOVERY.md');
+check('the self-test change address #0 matches', recovery.includes('bc1q8c6fshw2dlwun7ekn9qwf37cu2rn755upcp6el'), 'RECOVERY.md');
+check(
+  'and it needs nothing from this repo to be followed',
+  !/wallet\.mjs --restore/.test(recovery.split('## Restore it in another wallet')[1] ?? ''),
+  'RECOVERY.md',
+);
+
 console.log('\n== change chain ==');
 // Derived here from the same seed with the same libraries, independently of the
 // tool's own path, so a wrong chain constant shows up as a mismatch.
@@ -387,6 +406,27 @@ check('no extended private key reaches the record', !/xprv|tprv/.test(fpText), f
 check('it documents how to check a backup', /--expect-file/.test(fpText), fpText);
 check('it records its format version', /^fingerprint-version: 1$/m.test(fpText), fpText);
 check("it records the derivation path", /^path: m\/84'\/0'\/0'$/m.test(fpText), fpText);
+check('it records the coin type', /^coin: 0$/m.test(fpText), fpText);
+check("it records the receive chain's path", /^receive-path: m\/84'\/0'\/0'\/0$/m.test(fpText), fpText);
+check("it records the change chain's path", /^change-path: m\/84'\/0'\/0'\/1$/m.test(fpText), fpText);
+
+// The point of those fields: a reader with no access to this tool can take the
+// path from the record and land on the address in the same file.
+const recordPath = (name) => (fpText.match(new RegExp(`^${name}: (.+)$`, 'm')) ?? [])[1];
+const deriveAt = (path, index) => {
+  const node = HDKey.fromMasterSeed(mnemonicToSeedSync(VECTOR, '')).derive(path).deriveChild(index);
+  return bitcoin.payments.p2wpkh({ pubkey: Buffer.from(node.publicKey) }).address;
+};
+check(
+  'the recorded receive path derives the recorded address #0',
+  `address #0: ${deriveAt(recordPath('receive-path'), 0)}` === (fpText.match(/^address #0: .*$/m) ?? [])[0],
+  fpText,
+);
+check(
+  'and the change path derives the change address the report shows',
+  deriveAt(recordPath('change-path'), 0) === changeAddressAt(0),
+  `${deriveAt(recordPath('change-path'), 0)} vs ${changeAddressAt(0)}`,
+);
 check('it records that no 25th word was used', /^passphrase: none$/m.test(fpText), fpText);
 
 console.log('\n== the record says which passphrase it needs ==');
