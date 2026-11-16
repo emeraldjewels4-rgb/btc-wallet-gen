@@ -116,6 +116,12 @@ not look like the wrong wallet. A receive-chain xpub cannot derive its sibling
 chain, so `--xpub` with one says the change addresses are out of reach rather
 than leaving them out silently; pass the account key to see them.
 
+A successful check leaves its timestamp in `.wallet-verify-state.json` (no secret,
+and git-ignored), so `watchdog.mjs` can complain once the drill has not been run
+for six months. `--verify-state PATH` writes it somewhere else, which is what you
+want when the check is done on the off-line machine and the watchdog runs on
+another.
+
 The record also carries `fingerprint-version`, `path` and `passphrase`, so the
 check can say what actually went wrong: a missing 25th word is named as such
 instead of being blamed on the phrase, a record made for a different derivation
@@ -134,7 +140,8 @@ half-read. Older records without those lines still verify normally.
 | `--phrase-only` | print only the new seed phrase on stdout, so a redirect is a restorable backup; generation only, never with `--show-key`, and refuses to run when stdout is a terminal |
 | `--expect VALUE` | compare a restore against an xpub or address recorded earlier; needs `--restore`, exits 3 on a mismatch |
 | `--fingerprint PATH` | write the account, receive-chain and change-chain xpubs plus the first five addresses (or `--count N`) to `PATH` as a public record (`-` for stdout) |
-| `--expect-file PATH` | compare a restore against that record; needs `--restore`, exits 3 on a mismatch |
+| `--expect-file PATH` | compare a restore against that record; needs `--restore`, exits 3 on a mismatch, and records the timestamp on success |
+| `--verify-state PATH` | where that timestamp goes (default `.wallet-verify-state.json`, git-ignored) |
 | `-h`, `--help` | usage |
 
 Environment: `BIP39_PASSPHRASE` (default empty).
@@ -401,7 +408,12 @@ node --env-file=.env watchdog.mjs --expected-days 7
   schedule stopped"
 - `--audit` is repeatable, unreadable lines are counted and skipped, and a
   missing log counts as stale rather than as nothing to report
-- nothing is written: this tool only reads the log, so it is safe to run often
+- it also reads the backup timestamp: a successful `--expect-file` run leaves
+  `verifiedAt` in `.wallet-verify-state.json`, and a missing timestamp or one
+  older than `--wallet-months` (default 6) is stale too - the drill that is done
+  once and never repeated is the failure this catches
+- nothing is written: this tool only reads the log and that state file, so it is
+  safe to run often
 - the page carries `<time datetime="...">` with the full ISO instant, so a
   monitor can tell a stale published snapshot from a fresh one without parsing
   prose
@@ -412,7 +424,8 @@ run `watchdog.mjs` from another host, if you need to hear about a machine that
 never wakes.
 
 `npm run test:watchdog` covers the threshold on both sides, the missing log, the
-damaged log, several logs at once, and the alert with and without a webhook.
+damaged log, several logs at once, the alert with and without a webhook, and the
+backup timestamp: fresh, months old, never written and unreadable.
 
 ## Slack alerts
 

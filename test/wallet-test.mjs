@@ -11,7 +11,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -53,9 +53,17 @@ function check(label, condition, detail = '') {
   console.log(`  FAIL  ${label}${detail ? ` -> ${detail}` : ''}`);
 }
 
+// A successful --expect-file writes a timestamp, which must not land in the
+// repository's own state file: every run is pointed at a scratch one instead.
+const TEST_STATE = join(tmpdir(), `wallet-test-verify-state-${process.pid}.json`);
+
 function runWallet(args, input = '', env = {}) {
+  const full = args.includes('--verify-state') ? args : ['--verify-state', TEST_STATE, ...args];
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, ['wallet.mjs', ...args], { cwd: ROOT, env: { ...process.env, ...env } });
+    const child = spawn(process.execPath, ['wallet.mjs', ...full], {
+      cwd: ROOT,
+      env: { ...process.env, ...env },
+    });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (chunk) => {
@@ -519,6 +527,37 @@ check('and is explained the same way', /testnet and this wallet restores mainnet
 
 run = await runWallet(['--restore', '--expect', accountXpub], VECTOR, { BIP39_PASSPHRASE: 'wrong' });
 check('a genuinely wrong passphrase still blames the passphrase', /passphrase or the recorded value is wrong/.test(run.out), run.out.trim());
+
+console.log('\n== the check leaves a timestamp for the watchdog ==');
+// Run in a scratch directory so the state file does not land in the repository.
+const verifyDir = mkdtempSync(join(tmpdir(), 'wallet-verify-'));
+const statePath = join(verifyDir, 'verify-state.json');
+const localRecord = join(verifyDir, 'record.txt');
+await runWallet(['--restore', '--fingerprint', localRecord, '--count', '2'], VECTOR);
+
+run = await runWallet(['--restore', '--expect-file', localRecord, '--verify-state', statePath], VECTOR);
+check('a successful check exits 0', run.code === 0, `exit ${run.code}: ${run.out}`);
+check('and writes the state file', existsSync(statePath), verifyDir);
+
+const state = existsSync(statePath) ? JSON.parse(readFileSync(statePath, 'utf8')) : {};
+check(
+  'with a timestamp that is now',
+  Number.isFinite(Date.parse(state.verifiedAt)) && Math.abs(Date.now() - Date.parse(state.verifiedAt)) < 60_000,
+  JSON.stringify(state),
+);
+check('and the record it verified', state.record === localRecord, JSON.stringify(state));
+check('it says where it recorded it', run.out.includes(`Recorded in ${statePath}`), run.out);
+
+const failedState = join(verifyDir, 'failed-state.json');
+run = await runWallet(['--restore', '--expect', EXPECTED_TESTNET_0, '--verify-state', failedState], VECTOR);
+check('a failed check exits 3', run.code === 3, `exit ${run.code}`);
+check('and leaves no timestamp behind', !existsSync(failedState), failedState);
+
+const planted = JSON.stringify({ verifiedAt: '2020-01-01T00:00:00.000Z', record: 'older' });
+writeFileSync(statePath, planted);
+run = await runWallet(['--restore', '--expect', accountXpub, '--verify-state', statePath], VECTOR);
+check('a bare --expect does not touch the state file', readFileSync(statePath, 'utf8') === planted, readFileSync(statePath, 'utf8'));
+rmSync(verifyDir, { recursive: true, force: true });
 
 console.log('\n== --expect misuse ==');
 run = await runWallet(['--expect', accountXpub], VECTOR);

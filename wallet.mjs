@@ -9,7 +9,8 @@
  * derived at m/84'/0'/0'/0/i for the receive chain.
  *
  * No network calls. Nothing is written to disk unless --fingerprint asks for a
- * public record file, which holds no secret.
+ * public record file, or a successful --expect-file records its timestamp in
+ * .wallet-verify-state.json. Neither holds a secret.
  *
  * Usage:
  *   node wallet.mjs                       generate: seed phrase + address #0
@@ -42,6 +43,9 @@ const EXIT_MISMATCH = 3;
 // front of you, so both cover a handful of addresses by default; --count
 // overrides them, and the report's default of one lives where it is printed.
 const CHECKED_ADDRESSES = 5;
+// Where a successful --expect-file run leaves its timestamp, so watchdog.mjs can
+// say when the drill was last done. Holds no secret, and is git-ignored.
+const VERIFY_STATE = '.wallet-verify-state.json';
 // Bumped when the record's fields change shape. A reader that does not know a
 // version refuses the file rather than verifying the half of it it understands.
 const FINGERPRINT_VERSION = 1;
@@ -64,6 +68,9 @@ function usage() {
   --show-key    also print the WIF private key for address #0; to a terminal it
                 refuses unless --allow-tty is passed
   --allow-tty   print that private key to the terminal anyway
+  --verify-state PATH
+                where a successful --expect-file records its timestamp, for
+                watchdog.mjs (default ${VERIFY_STATE})
   --phrase-only print only the new seed phrase on stdout, one line and nothing
                 else, so 'node wallet.mjs --phrase-only > seed.txt' is a backup
                 that --restore accepts; generation only, never with --show-key,
@@ -94,6 +101,7 @@ function parseArgs(argv) {
     count: null,
     showKey: false,
     allowTty: false,
+    verifyState: VERIFY_STATE,
     restore: false,
     phraseOnly: false,
     xpub: null,
@@ -110,6 +118,11 @@ function parseArgs(argv) {
       opts.showKey = true;
     } else if (arg === '--allow-tty') {
       opts.allowTty = true;
+    } else if (arg === '--verify-state') {
+      const value = argv[i + 1];
+      if (value === undefined || value === '') fail('--verify-state needs a path');
+      opts.verifyState = value;
+      i += 1;
     } else if (arg === '--restore') {
       opts.restore = true;
     } else if (arg === '--phrase-only') {
@@ -415,6 +428,19 @@ function resolveExpectation(expectation, { account, receive, change, passphrase 
   }
 }
 
+// A backup check that is never repeated is only presumed good. Record when it
+// last succeeded; a failed one leaves the old timestamp alone rather than
+// pretending the drill happened.
+function recordVerification(path, record) {
+  const state = { verifiedAt: new Date().toISOString(), record };
+  try {
+    writeFileSync(path, `${JSON.stringify(state, null, 2)}\n`);
+    console.log(`Recorded in ${path}; watchdog.mjs reports it once it goes stale.`);
+  } catch (err) {
+    console.error(`warning: the check passed but ${path} could not be written: ${err.message}`);
+  }
+}
+
 // The one place the outcome is printed, whatever produced the expectations.
 function reportVerdict(verdict, source) {
   console.log('');
@@ -655,6 +681,7 @@ async function main() {
     const source = opts.expectFile !== null ? `--expect-file ${opts.expectFile}` : '--expect';
     const verdict = compareWallet({ account, receive, change, passphrase }, expectationsFor(opts));
     reportVerdict(verdict, source);
+    if (verdict.ok && opts.expectFile !== null) recordVerification(opts.verifyState, opts.expectFile);
   }
 }
 

@@ -16,6 +16,10 @@
  *   node --env-file=.env watchdog.mjs --expected-days 7
  *   node watchdog.mjs --audit refill-audit.jsonl --expected-days 3
  *
+ * The second thing it looks at is the backup. A successful wallet --expect-file
+ * run leaves a timestamp; once that is older than a few months, or missing, the
+ * drill has become a one-off and the alert says so.
+ *
  * Exit codes: 0 recent activity, 1 usage or config error, 2 runtime error,
  *             3 stale - the code every other tool here uses for a safety refusal,
  *             since both mean "stopped, do not treat this as healthy".
@@ -25,7 +29,14 @@ import { existsSync, readFileSync } from 'node:fs';
 import { createSlackNotifier, resolveSlackWebhooks } from './notify.mjs';
 
 const AUDIT_DEFAULT = 'refill-audit.jsonl';
+const WALLET_STATE_DEFAULT = '.wallet-verify-state.json';
 const DAY_MS = 24 * 60 * 60 * 1000;
+// Months are counted as 30 days: the exact length decides nothing here, and a
+// calendar would only invite arguments about which one.
+const MONTH_DAYS = 30;
+// Longer than a quarterly review, short enough that a lapse is caught while the
+// backup material can still be found.
+const WALLET_MONTHS_DEFAULT = 6;
 // "About 1.5 intervals" leaves room for one missed run plus clock and timezone
 // drift, and still reports a switch-off machine within two weeks of a weekly job.
 const STALE_FACTOR = 1.5;
@@ -52,6 +63,10 @@ Options:
   --audit PATH        audit log to watch, repeatable (default ${AUDIT_DEFAULT})
   --expected-days N   how often a run is expected (default 7); the alert fires
                       past ${STALE_FACTOR} x this, so 10.5 days by default
+  --wallet-state PATH  timestamp left by a successful wallet --expect-file run
+                      (default ${WALLET_STATE_DEFAULT})
+  --wallet-months N   how often the backup should be checked (default
+                      ${WALLET_MONTHS_DEFAULT}); a missing or older timestamp is stale
   -h, --help          show this help
 
 Environment:
@@ -59,11 +74,17 @@ Environment:
   SLACK_ALERT_WEBHOOK_URL   channel for this alert (default: SLACK_WEBHOOK_URL)
 
 Exit codes: 0 recent activity, 1 usage or config error, 2 runtime error,
-            3 stale. Nothing is written: this tool only reads the log.`);
+            3 stale. Nothing is written: this tool only reads the log and the
+            backup state.`);
 }
 
 function parseArgs(argv) {
-  const opts = { audits: [], expectedDays: 7 };
+  const opts = {
+    audits: [],
+    expectedDays: 7,
+    walletState: WALLET_STATE_DEFAULT,
+    walletMonths: WALLET_MONTHS_DEFAULT,
+  };
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -86,6 +107,15 @@ function parseArgs(argv) {
         fail(`--expected-days expects a positive number of days, got "${raw}"`);
       }
       opts.expectedDays = days;
+    } else if (arg === '--wallet-state') {
+      opts.walletState = next();
+    } else if (arg === '--wallet-months') {
+      const raw = next();
+      const months = Number(raw);
+      if (!Number.isFinite(months) || months <= 0 || months > 120) {
+        fail(`--wallet-months expects a positive number of months, got "${raw}"`);
+      }
+      opts.walletMonths = months;
     } else {
       fail(`unknown argument "${arg}" (try --help)`);
     }
@@ -133,6 +163,45 @@ function days(ms) {
   return (ms / DAY_MS).toFixed(1);
 }
 
+// A backup check that is never repeated is only presumed good, and the record it
+// was checked against drifts out of memory first. Reports the age of the last
+// successful wallet --expect-file run.
+function backupState(path, months, now) {
+  const limitMs = months * MONTH_DAYS * DAY_MS;
+  if (!existsSync(path)) {
+    return {
+      ok: false,
+      message:
+        `no backup verification is recorded in ${path} - run ` +
+        'node wallet.mjs --restore --expect-file <record> < seed.txt',
+    };
+  }
+
+  let verifiedAt = null;
+  try {
+    verifiedAt = Date.parse(JSON.parse(readFileSync(path, 'utf8')).verifiedAt);
+  } catch {
+    verifiedAt = null;
+  }
+  if (!Number.isFinite(verifiedAt)) {
+    return { ok: false, message: `${path} has no readable verifiedAt - re-run the restore check to rewrite it` };
+  }
+
+  const ageMs = now - verifiedAt;
+  if (ageMs > limitMs) {
+    return {
+      ok: false,
+      message:
+        `the backup was last verified ${new Date(verifiedAt).toISOString()} (${days(ageMs)} days ago) - ` +
+        `check it at least every ${months} month(s)`,
+    };
+  }
+  return {
+    ok: true,
+    message: `backup verified ${days(ageMs)} days ago (${new Date(verifiedAt).toISOString()}); stale past ${days(limitMs)}`,
+  };
+}
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   const notifier = createSlackNotifier({ ...resolveSlackWebhooks(), log });
@@ -142,6 +211,7 @@ async function main() {
   const limitMs = opts.expectedDays * DAY_MS * STALE_FACTOR;
   const age = newest === null ? null : now - newest;
   const where = opts.audits.join(', ');
+  const fresh = age !== null && age <= limitMs;
 
   const summary = [`${opts.audits.length} log(s)`, `${entries} entr${entries === 1 ? 'y' : 'ies'}`];
   if (unreadable) summary.push(`${unreadable} unreadable line(s)`);
@@ -149,32 +219,40 @@ async function main() {
   log(notifier.describe());
   log(summary.join(', '));
 
-  if (age !== null && age <= limitMs) {
+  const reasons = [];
+  if (fresh) {
     log(
       `ok: newest entry ${new Date(newest).toISOString()} (${days(age)} days ago); ` +
         `expected every ${opts.expectedDays} day(s), stale past ${days(limitMs)}`,
     );
-    return;
+  } else {
+    reasons.push(
+      age === null
+        ? `no refill activity is recorded in ${where} - the log is missing, empty or has no ` +
+          'readable entry, so no scheduled run has reached it'
+        : `nothing recorded since ${new Date(newest).toISOString()} (${days(age)} days ago), ` +
+          `and a run is expected every ${opts.expectedDays} day(s) - anything older than ` +
+          `${days(limitMs)} days means the schedule stopped`,
+    );
   }
 
-  const reason =
-    age === null
-      ? `no refill activity is recorded in ${where} - the log is missing, empty or has no ` +
-        'readable entry, so no scheduled run has reached it'
-      : `nothing recorded since ${new Date(newest).toISOString()} (${days(age)} days ago), ` +
-        `and a run is expected every ${opts.expectedDays} day(s) - anything older than ` +
-        `${days(limitMs)} days means the schedule stopped`;
+  const backup = backupState(opts.walletState, opts.walletMonths, now);
+  if (backup.ok) log(`ok: ${backup.message}`);
+  else reasons.push(backup.message);
 
-  console.error(`stale: ${reason}`);
+  if (reasons.length === 0) return;
+
+  console.error(reasons.map((reason) => `stale: ${reason}`).join('\n'));
 
   if (notifier.enabled) {
     await notifier.alert(
       `stale:${opts.audits[0]}`,
       [
-        ":rotating_light: *no refill activity (high)* - dead-man's switch",
-        reason,
+        ':rotating_light: *watchdog (high)* - something that should have happened did not',
+        ...reasons,
         `log ${where}${missing.length ? ` (missing: ${missing.join(', ')})` : ''}`,
         `expected every ${opts.expectedDays} day(s) | alerts past ${days(limitMs)} days`,
+        `backup ${opts.walletState} | checked at least every ${opts.walletMonths} month(s)`,
         'severity high',
       ].join('\n'),
     );

@@ -39,11 +39,19 @@ function entry(tsMs, txByte = 'ab') {
 }
 
 const DIR = mkdtempSync(join(tmpdir(), 'treasury-watchdog-'));
+const WALLET_STATE = join(DIR, 'wallet-verify-state.json');
 let slack = null;
 
+function freshBackup(verifiedAt = Date.now()) {
+  writeFileSync(WALLET_STATE, JSON.stringify({ verifiedAt: new Date(verifiedAt).toISOString(), record: 'fp.txt' }));
+}
+
+// Every run gets a backup state unless the test supplies its own, so the audit
+// checks below stay about the audit.
 function runWatchdog(args, env = {}) {
+  const full = args.includes('--wallet-state') ? args : ['--wallet-state', WALLET_STATE, ...args];
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, ['watchdog.mjs', ...args], {
+    const child = spawn(process.execPath, ['watchdog.mjs', ...full], {
       cwd: ROOT,
       env: { ...process.env, SLACK_WEBHOOK_URL: slack.url, ...env },
     });
@@ -62,6 +70,7 @@ try {
   slack = await startFakeSlack();
   const now = Date.now();
   const log = join(DIR, 'refill-audit.jsonl');
+  freshBackup(now);
 
   console.log('== recent activity ==');
   writeFileSync(log, `${entry(now - 60 * 60 * 1000)}\n`);
@@ -88,7 +97,7 @@ try {
   check('exactly one alert was sent', slack.messages.length === 1, String(slack.messages.length));
 
   const text = slack.messages[0]?.text ?? '';
-  check('the alert is labelled high severity', /no refill activity \(high\)/.test(text), text);
+  check('the alert is labelled high severity', /watchdog \(high\)/.test(text), text);
   check('the alert carries the interval', /expected every 7 day\(s\)/.test(text), text);
   check('the alert carries the log path', text.includes(log), text);
   check('the alert carries no transaction id or key', !/0x[0-9a-fA-F]{64}/.test(text), text);
@@ -130,6 +139,47 @@ try {
   check('a stale log without a webhook still exits 3', run.code === 3, `exit ${run.code}`);
   check('and sends nothing', slack.messages.length === beforeQuiet);
   check('the reason is still printed', /stale: nothing recorded since/.test(run.out), run.out.trim());
+
+  console.log('\n== the backup drill must not decay ==');
+  writeFileSync(log, `${entry(now - 60 * 60 * 1000)}\n`);
+  freshBackup(now);
+  run = await runWatchdog(['--audit', log, '--expected-days', '7']);
+  check('a recently verified backup exits 0', run.code === 0, `exit ${run.code}: ${run.out.trim()}`);
+  check('and reports when it was verified', /ok: backup verified 0\.0 days ago/.test(run.out), run.out.trim());
+
+  freshBackup(now - 8 * 30 * DAY);
+  run = await runWatchdog(['--audit', log, '--expected-days', '7']);
+  check('a backup unchecked for eight months exits 3', run.code === 3, `exit ${run.code}`);
+  check('it says when it was last verified', /last verified .*\(240\.0 days ago\)/.test(run.out), run.out.trim());
+  check('and how often it should be checked', /at least every 6 month\(s\)/.test(run.out), run.out.trim());
+  check('the alert carries the backup reason', /last verified/.test(slack.messages.at(-1)?.text ?? ''), slack.messages.at(-1)?.text);
+  check('the alert names the state file', (slack.messages.at(-1)?.text ?? '').includes(WALLET_STATE));
+
+  run = await runWatchdog(['--audit', log, '--expected-days', '7', '--wallet-months', '12']);
+  check('--wallet-months widens the window', run.code === 0, `exit ${run.code}: ${run.out.trim()}`);
+
+  freshBackup(now - 2 * 30 * DAY);
+  run = await runWatchdog(['--audit', log, '--expected-days', '7', '--wallet-months', '1']);
+  check('--wallet-months narrows it too', run.code === 3, `exit ${run.code}`);
+
+  freshBackup(now);
+  const never = join(DIR, 'never-verified.json');
+  run = await runWatchdog(['--wallet-state', never, '--audit', log, '--expected-days', '7']);
+  check('a backup that was never checked exits 3', run.code === 3, `exit ${run.code}`);
+  check(
+    'and says how to do it',
+    /no backup verification is recorded in .*--restore --expect-file/.test(run.out),
+    run.out.trim(),
+  );
+
+  const broken = join(DIR, 'broken-state.json');
+  writeFileSync(broken, 'not json');
+  run = await runWatchdog(['--wallet-state', broken, '--audit', log, '--expected-days', '7']);
+  check('an unreadable state file exits 3', run.code === 3, `exit ${run.code}`);
+  check('and says the timestamp is unreadable', /no readable verifiedAt/.test(run.out), run.out.trim());
+
+  const badMonths = await runWatchdog(['--wallet-months', '0']);
+  check('--wallet-months must be positive', badMonths.code === 1, `exit ${badMonths.code}`);
 
   console.log('\n== arguments ==');
   const badDays = await runWatchdog(['--expected-days', '0']);

@@ -21,6 +21,9 @@ node_modules/
 # `node wallet.mjs --phrase-only > seed.txt`. The bare names are anchored to the
 # root with a leading slash so a fixture at test/fixtures/seed.txt is still
 # tracked; the *.seed.txt suffix catches copies made anywhere.
+# Written by a successful --expect-file run: a timestamp, no secret. It is local
+# state, not part of the record it verified.
+.wallet-verify-state.json
 /seed.txt
 /seed-phrase.txt
 /seedphrase.txt
