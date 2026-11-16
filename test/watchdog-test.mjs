@@ -43,8 +43,9 @@ const DIR = mkdtempSync(join(tmpdir(), 'treasury-watchdog-'));
 const WALLET_STATE = join(DIR, 'wallet-verify-state.json');
 let slack = null;
 
+// A state as wallet.mjs now writes it: the record it verified, pinned by hash.
 function freshBackup(verifiedAt = Date.now()) {
-  writeFileSync(WALLET_STATE, JSON.stringify({ verifiedAt: new Date(verifiedAt).toISOString(), record: 'fp.txt' }));
+  backupWithRecord(verifiedAt);
 }
 
 // A state file that names the record it verified and pins its contents, as
@@ -201,6 +202,27 @@ try {
   run = await runWatchdog(['--audit', log, '--expected-days', '7']);
   check('an unreadable record is not an alarm', run.code === 0, `exit ${run.code}: ${run.out.trim()}`);
   check('and the age is still reported', /ok: backup verified/.test(run.out), run.out.trim());
+
+  console.log('\n== a state from before records were pinned ==');
+  // Written by a version that stored a timestamp and a path but nothing that
+  // could say whether the record still matches: not a green light, and the
+  // drill it asks for is the thing that pins it.
+  writeFileSync(
+    WALLET_STATE,
+    JSON.stringify({ verifiedAt: new Date(now).toISOString(), record: RECORD }),
+  );
+  run = await runWatchdog(['--audit', log, '--expected-days', '7']);
+  check('an unpinned verification exits 3', run.code === 3, `exit ${run.code}: ${run.out.trim()}`);
+  check(
+    'and says the record was never pinned, asking for the drill',
+    /before the record was pinned/.test(run.out) && /re-run the drill/.test(run.out),
+    run.out.trim(),
+  );
+  check('the alert carries it too', /before the record was pinned/.test(slack.messages.at(-1)?.text ?? ''), slack.messages.at(-1)?.text);
+
+  writeFileSync(WALLET_STATE, JSON.stringify({ verifiedAt: new Date(now).toISOString() }));
+  run = await runWatchdog(['--audit', log, '--expected-days', '7']);
+  check('a state with no record at all says the same', /before the record was pinned/.test(run.out), run.out.trim());
 
   freshBackup(now);
   const never = join(DIR, 'never-verified.json');

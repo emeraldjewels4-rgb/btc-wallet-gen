@@ -238,7 +238,20 @@ try {
   check('a missing timestamp is said plainly', /no backup verification recorded yet/.test(run.out), run.out.trim());
   check('and says how to produce one', /--restore --expect-file/.test(run.out), run.out.trim());
 
-  writeFileSync(WALLET_STATE, JSON.stringify({ verifiedAt: new Date().toISOString() }));
+  // A current state pins the record it verified; these fixtures use that so they
+  // exercise the age line rather than the "never pinned" caveat.
+  const recordPath = join(tmpdir(), 'weekly-test-record.txt');
+  const digest = (text) => `sha256:${createHash('sha256').update(text).digest('hex')}`;
+  const recordText = 'address #0: bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu\n';
+  const pinned = (verifiedAt) => {
+    writeFileSync(recordPath, recordText);
+    writeFileSync(
+      WALLET_STATE,
+      JSON.stringify({ verifiedAt: new Date(verifiedAt).toISOString(), record: recordPath, recordHash: digest(recordText) }),
+    );
+  };
+
+  pinned(Date.now());
   run = await runWeekly(['--audit', AUDIT]);
   check(
     'a fresh drill is dated',
@@ -246,13 +259,13 @@ try {
     run.out.trim(),
   );
 
-  writeFileSync(WALLET_STATE, JSON.stringify({ verifiedAt: new Date(Date.now() - 240 * DAY).toISOString() }));
+  pinned(Date.now() - 240 * DAY);
   run = await runWeekly(['--audit', AUDIT]);
   check('an old one shows its age, before any alert', /\(240\.0 days ago\)/.test(run.out), run.out.trim());
   check('the section is labelled', /\*Backup check\*/.test(run.out), run.out.trim());
 
   const beforePost = slack.messages.length;
-  writeFileSync(WALLET_STATE, JSON.stringify({ verifiedAt: new Date(Date.now() - 3 * DAY).toISOString() }));
+  pinned(Date.now() - 3 * DAY);
   run = await runWeekly(['--audit', AUDIT, '--week', '2026-W45', '--post', '--force', '--webhook-file', WEBHOOK_FILE]);
   check('the posted message carries it too', (slack.messages.at(-1)?.text ?? '').includes('*Backup check*'), slack.messages.at(-1)?.text);
   check('and the age is in the posted text', /\(3\.0 days ago\)/.test(slack.messages.at(-1)?.text ?? ''));
@@ -262,16 +275,28 @@ try {
   run = await runWeekly(['--audit', AUDIT]);
   check('an unreadable one says so', /is unreadable - re-run the restore check/.test(run.out), run.out.trim());
 
+  // A state written before the record was pinned cannot say whether the record
+  // still matches what was checked, so it is not a green light either.
+  writeFileSync(WALLET_STATE, JSON.stringify({ verifiedAt: new Date().toISOString(), record: recordPath }));
+  run = await runWeekly(['--audit', AUDIT]);
+  check(
+    'a state that predates pinning says so instead of a green age',
+    /but that verification predates the record being pinned - run the drill again/.test(run.out),
+    run.out.trim(),
+  );
+  check(
+    'and does not read as a plain verified line',
+    !/^- last verified [^,]*\([\d.]+ days ago\)$/m.test(run.out),
+    run.out.trim(),
+  );
+
+  writeFileSync(WALLET_STATE, JSON.stringify({ verifiedAt: new Date().toISOString() }));
+  run = await runWeekly(['--audit', AUDIT]);
+  check('a state with no record at all says the same', /predates the record being pinned/.test(run.out), run.out.trim());
+
   // The record the drill verified is pinned by hash: editing it later means the
   // green light belongs to a file nobody checked.
-  const recordPath = join(tmpdir(), 'weekly-test-record.txt');
-  const digest = (text) => `sha256:${createHash('sha256').update(text).digest('hex')}`;
-  const recordText = 'address #0: bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu\n';
-  writeFileSync(recordPath, recordText);
-  writeFileSync(
-    WALLET_STATE,
-    JSON.stringify({ verifiedAt: new Date(Date.now() - 3 * DAY).toISOString(), record: recordPath, recordHash: digest(recordText) }),
-  );
+  pinned(Date.now() - 3 * DAY);
   run = await runWeekly(['--audit', AUDIT]);
   check(
     'an unchanged record reports the age plainly',

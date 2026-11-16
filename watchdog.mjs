@@ -183,7 +183,19 @@ function backupState(path, limitDays, now) {
   // The green light was given for one record. If that record has been edited
   // since, the light is for something nobody checked, which matters more than
   // how long ago it was - re-running the drill is the answer to both.
-  if (recordState({ record, recordHash }) === 'changed') {
+  const state = recordState({ record, recordHash });
+  if (state === 'unrecorded') {
+    // Written before the state pinned anything, so nothing here can say whether
+    // the record still matches what was checked. Not a green light, and not an
+    // alarm about the record either: the drill it asks for pins it from now on.
+    return {
+      ok: false,
+      message:
+        `${path} records a verification from before the record was pinned to its contents - ` +
+        're-run the drill, node wallet.mjs --restore --expect-file <record> < seed.txt',
+    };
+  }
+  if (state === 'changed') {
     return {
       ok: false,
       message: `the record ${record} has changed since the backup was verified - check the backup against it again`,

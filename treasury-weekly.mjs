@@ -127,9 +127,13 @@ function backupText(path, now = Date.now()) {
     return `- ${path} is unreadable - re-run the restore check to rewrite it`;
   }
   const when = `last verified ${new Date(verifiedAt).toISOString().slice(0, 10)} (${((now - verifiedAt) / DAY_MS).toFixed(1)} days ago)`;
-  return recordState({ record, recordHash }) === 'changed'
-    ? `- ${when}, but the record has changed since - run the drill again`
-    : `- ${when}`;
+  const state = recordState({ record, recordHash });
+  if (state === 'unrecorded') {
+    // A timestamp from before the state pinned the record says nothing about
+    // whether that record still matches, so the line asks for the drill.
+    return `- ${when}, but that verification predates the record being pinned - run the drill again`;
+  }
+  return state === 'changed' ? `- ${when}, but the record has changed since - run the drill again` : `- ${when}`;
 }
 
 function weekLabel({ year, week }) {

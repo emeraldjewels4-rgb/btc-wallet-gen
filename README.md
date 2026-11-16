@@ -163,7 +163,10 @@ the watchdog and the weekly line say the record has changed since, rather than
 reporting a green light for a file nobody checked. Running the drill again pins
 the new contents. A record that cannot be read at all is not treated as changed:
 keeping it on the off-line machine is a legitimate arrangement, so the hash only
-speaks when both sides are present.
+speaks when both sides are present. A verification recorded before the state
+pinned anything is not a green light either: the watchdog and the weekly line
+both say it predates the pinning and ask for the drill, which is what pins the
+record.
 
 Deriving an address is not the same as being able to move from it, and the
 difference stays invisible until the day the backup is needed. `--spend-check`
