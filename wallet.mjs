@@ -27,8 +27,9 @@
  * echo - the environment is last because other processes can read it.
  */
 
-import { readFileSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, fstatSync, openSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { BACKUP_STATE_DEFAULT, recordDigest } from './backup-state.mjs';
+import { readPermissionVerdict } from './file-permissions.mjs';
 import { createInterface } from 'node:readline/promises';
 import { resolve } from 'node:path';
 import { spendProof } from './spend-check.mjs';
@@ -62,6 +63,11 @@ function usage() {
 
   --restore     derive addresses from an existing seed phrase read from stdin
                 (pipe it in: node wallet.mjs --restore < seed.txt)
+  --phrase-file PATH
+                read the phrase to restore from PATH instead of stdin; a file
+                that group or others can read is refused
+  --allow-loose-permissions
+                read such a --phrase-file anyway
   --xpub XPUB   derive addresses from an extended public key instead of a seed
                 (xpub for mainnet, tpub for testnet; account m/84'/COIN'/0'
                 or its receive chain m/84'/COIN'/0'/0)
@@ -115,6 +121,8 @@ function parseArgs(argv) {
     showKey: false,
     allowTty: false,
     spendCheck: false,
+    phraseFile: null,
+    allowLoosePermissions: false,
     passphraseFile: null,
     out: null,
     // Where a successful --expect-file run leaves its timestamp; watchdog.mjs
@@ -138,6 +146,13 @@ function parseArgs(argv) {
       opts.allowTty = true;
     } else if (arg === '--spend-check') {
       opts.spendCheck = true;
+    } else if (arg === '--allow-loose-permissions') {
+      opts.allowLoosePermissions = true;
+    } else if (arg === '--phrase-file') {
+      const value = argv[i + 1];
+      if (value === undefined || value === '') fail('--phrase-file needs a path');
+      opts.phraseFile = value;
+      i += 1;
     } else if (arg === '--out') {
       const value = argv[i + 1];
       if (value === undefined || value === '') fail('--out needs a path');
@@ -195,6 +210,12 @@ function parseArgs(argv) {
   }
   if (opts.xpub !== null && opts.restore) fail('--xpub and --restore are mutually exclusive');
   if (opts.xpub !== null && opts.showKey) fail('--show-key needs a seed; an xpub has no private key');
+  if (opts.phraseFile !== null && !opts.restore) {
+    fail('--phrase-file is the phrase to restore, so it needs --restore');
+  }
+  if (opts.allowLoosePermissions && opts.phraseFile === null) {
+    fail('--allow-loose-permissions only relaxes the check on --phrase-file');
+  }
   if (opts.expect !== null && !opts.restore) fail('--expect compares a restored wallet, so it needs --restore');
   if (opts.expectFile !== null && !opts.restore) fail('--expect-file compares a restored wallet, so it needs --restore');
   if (opts.expect !== null && opts.expectFile !== null) {
@@ -302,6 +323,34 @@ async function resolvePassphrase(opts, { prompt = true } = {}) {
   return prompt && process.stdin.isTTY
     ? await readSecret('BIP-39 passphrase (empty for none): ')
     : '';
+}
+
+// The phrase is only as private as the file holding it. --out asks for 0600 on
+// the way out; this is the same question asked on the way in, of the file
+// descriptor so that the file which was checked is the file that is read.
+function readPhraseFile(path, allowLoose) {
+  let fd;
+  try {
+    fd = openSync(path, 'r');
+  } catch (err) {
+    fail(`cannot read --phrase-file ${path}: ${err.message}`);
+  }
+
+  let info;
+  let text;
+  try {
+    info = fstatSync(fd);
+    text = readFileSync(fd, 'utf8');
+  } catch (err) {
+    fail(`cannot read --phrase-file ${path}: ${err.message}`);
+  } finally {
+    closeSync(fd);
+  }
+
+  const verdict = readPermissionVerdict({ path, mode: info.mode, platform: process.platform, allowLoose });
+  if (verdict.note) process.stderr.write(verdict.note);
+  if (!verdict.ok) fail(verdict.reason);
+  return text;
 }
 
 // BIP-39 phrases are compared after Unicode normalization, case folding and
@@ -748,9 +797,14 @@ async function main() {
 
   let mnemonic;
   if (opts.restore) {
-    const raw = await readPhrase();
+    const raw =
+      opts.phraseFile !== null
+        ? readPhraseFile(opts.phraseFile, opts.allowLoosePermissions)
+        : await readPhrase();
     mnemonic = normalizePhrase(raw);
-    if (!mnemonic) fail('no seed phrase received on stdin');
+    if (!mnemonic) {
+      fail(opts.phraseFile !== null ? `no seed phrase in ${opts.phraseFile}` : 'no seed phrase received on stdin');
+    }
     if (looksLikeReport(raw)) {
       fail(
         'that input is the full report from wallet.mjs, not a seed phrase\n' +

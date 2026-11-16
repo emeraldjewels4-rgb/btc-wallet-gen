@@ -64,6 +64,18 @@ cat seed.txt | node wallet.mjs --restore --count 5
 node wallet.mjs --restore        # or paste it at the prompt (input is echoed)
 ```
 
+`--phrase-file PATH` reads it from a named file instead, and asks the question
+`--out` answers on the way out: a file that group or others can read is refused,
+with its mode in the message, unless `--allow-loose-permissions` says to read it
+anyway. On Windows there are no modes to read, so it says the permissions could
+not be checked rather than passing them silently - keep the file on an encrypted
+volume there.
+
+```sh
+chmod 600 seed.txt
+node wallet.mjs --restore --phrase-file seed.txt
+```
+
 Delete `seed.txt` afterwards.
 
 ### BIP-39 passphrase (optional 25th word)
@@ -191,6 +203,8 @@ half-read. Older records without those lines still verify normally.
 | `--spend-check` | prove a restored backup can spend, not only derive: sign a spend of address #0 offline, verify the signature, discard the transaction; needs `--restore`, exits 3 if the key cannot sign |
 | `--phrase-only` | print only the new seed phrase on stdout, so a redirect is a restorable backup; generation only, never with `--show-key`, and refuses to run when stdout is a terminal unless `--out` is given |
 | `--out PATH` | write what `--show-key` or `--phrase-only` would print to `PATH`: created rather than truncated, mode `0600` |
+| `--phrase-file PATH` | read the seed phrase to restore from `PATH` instead of stdin; refused if group or others can read it |
+| `--allow-loose-permissions` | read such a `--phrase-file` anyway |
 | `--expect VALUE` | compare a restore against an xpub or address recorded earlier; needs `--restore`, exits 3 on a mismatch |
 | `--fingerprint PATH` | write the account, receive-chain and change-chain xpubs plus the first five addresses (or `--count N`) to `PATH` as a public record (`-` for stdout) |
 | `--expect-file PATH` | compare a restore against that record; needs `--restore`, exits 3 on a mismatch, and records the timestamp on success |

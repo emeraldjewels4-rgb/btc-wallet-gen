@@ -12,7 +12,8 @@
 
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { readPermissionVerdict } from '../file-permissions.mjs';
 import { tmpdir } from 'node:os';
 import { spendProof } from '../spend-check.mjs';
 import { dirname, isAbsolute, join } from 'node:path';
@@ -285,6 +286,80 @@ check(
   onTerminal.stdout,
 );
 rmSync(secretDir, { recursive: true, force: true });
+
+console.log('\n== reading the phrase from a file ==');
+// The decision is checked here for every platform, since this machine can only
+// demonstrate one of them; the file itself follows.
+const fileMode = (bits) => 0o100000 | bits; // what fstat reports: file type plus mode
+let verdict = readPermissionVerdict({ path: 'seed.txt', mode: fileMode(0o644), platform: 'linux', allowLoose: false });
+check('a world-readable phrase file is refused', verdict.ok === false, JSON.stringify(verdict));
+check(
+  'the refusal names the mode and both ways out',
+  /mode 644/.test(verdict.reason) && /chmod 600/.test(verdict.reason) && /--allow-loose-permissions/.test(verdict.reason),
+  verdict.reason,
+);
+check(
+  'and the path',
+  verdict.reason.startsWith('seed.txt is readable'),
+  verdict.reason,
+);
+check(
+  'group-readable alone is enough to refuse',
+  readPermissionVerdict({ path: 's', mode: fileMode(0o640), platform: 'linux', allowLoose: false }).ok === false &&
+    readPermissionVerdict({ path: 's', mode: fileMode(0o604), platform: 'linux', allowLoose: false }).ok === false,
+);
+check(
+  '0600 is accepted',
+  readPermissionVerdict({ path: 's', mode: fileMode(0o600), platform: 'linux', allowLoose: false }).ok === true,
+);
+check(
+  'so is 0400, which is all a read needs',
+  readPermissionVerdict({ path: 's', mode: fileMode(0o400), platform: 'linux', allowLoose: false }).ok === true,
+);
+check(
+  'the flag makes it a note, not a refusal',
+  readPermissionVerdict({ path: 's', mode: fileMode(0o644), platform: 'linux', allowLoose: true }).ok === true,
+);
+verdict = readPermissionVerdict({ path: 'seed.txt', mode: fileMode(0o666), platform: 'win32', allowLoose: false });
+check(
+  'Windows cannot tell, and says so instead of passing silently',
+  verdict.ok === true && /could not be checked/.test(verdict.note ?? ''),
+  JSON.stringify(verdict),
+);
+
+const phraseDir = mkdtempSync(join(tmpdir(), 'wallet-phrase-file-'));
+const phraseFile = join(phraseDir, 'seed.txt');
+writeFileSync(phraseFile, `${VECTOR}\n`);
+run = await runWallet(['--restore', '--count', '1', '--phrase-file', phraseFile], '');
+check('--phrase-file restores without stdin', run.code === 0 && run.out.includes(EXPECTED_0), `exit ${run.code}: ${run.out}`);
+check('and prints nothing of the phrase itself', !run.out.includes(VECTOR), run.out);
+if (process.platform === 'win32') {
+  check('on Windows it says the mode could not be checked', /could not be checked/.test(run.out), run.out);
+} else {
+  chmodSync(phraseFile, 0o644);
+  run = await runWallet(['--restore', '--count', '1', '--phrase-file', phraseFile], '');
+  check('a group-or-other readable file exits 1', run.code === 1, `exit ${run.code}: ${run.out}`);
+  check('and says how to fix it', /chmod 600/.test(run.out), run.out.trim());
+  run = await runWallet(['--restore', '--count', '1', '--phrase-file', phraseFile, '--allow-loose-permissions'], '');
+  check('the flag reads it anyway', run.code === 0 && run.out.includes(EXPECTED_0), `exit ${run.code}: ${run.out}`);
+}
+
+writeFileSync(phraseFile, `${VECTOR}\r\n`);
+run = await runWallet(['--restore', '--count', '1', '--phrase-file', phraseFile], '');
+check('a Windows line ending is not part of the phrase', run.code === 0 && run.out.includes(EXPECTED_0), run.out);
+
+run = await runWallet(['--phrase-file', phraseFile], '');
+check('--phrase-file without --restore exits 1', run.code === 1, `exit ${run.code}`);
+check('and says it needs one', /needs --restore/.test(run.out), run.out.trim());
+
+run = await runWallet(['--restore', '--allow-loose-permissions'], VECTOR);
+check('--allow-loose-permissions alone exits 1', run.code === 1, `exit ${run.code}`);
+check('and says what it applies to', /only relaxes the check on --phrase-file/.test(run.out), run.out.trim());
+
+run = await runWallet(['--restore', '--phrase-file', join(phraseDir, 'missing.txt')], '');
+check('a missing phrase file exits 1', run.code === 1, `exit ${run.code}`);
+check('and names it', /cannot read --phrase-file .*missing\.txt/.test(run.out), run.out.trim());
+rmSync(phraseDir, { recursive: true, force: true });
 
 console.log('\n== proving the key can spend ==');
 run = await runWallet(['--restore', '--spend-check'], VECTOR);
