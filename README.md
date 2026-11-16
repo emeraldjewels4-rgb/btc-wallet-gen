@@ -53,18 +53,26 @@ Delete `seed.txt` afterwards.
 
 ### BIP-39 passphrase (optional 25th word)
 
-If the wallet was created with a passphrase, pass it through the environment.
-Read it into the shell without echoing it, so the 25th word never lands on the
-screen or in your shell history:
+The 25th word is a second secret, and an environment variable sits in the
+process table where anything that can list processes may read it. Hand it over on
+the other paths instead:
 
 ```sh
-read -rsp 'passphrase: ' BIP39_PASSPHRASE && export BIP39_PASSPHRASE
-node wallet.mjs --restore < seed.txt
-unset BIP39_PASSPHRASE
+node wallet.mjs --restore --passphrase-file ~/passphrase.txt < seed.txt
+BIP39_PASSPHRASE_FILE=~/passphrase.txt node wallet.mjs --restore < seed.txt
 ```
 
-An inline `BIP39_PASSPHRASE='...' node wallet.mjs ...` would record the
-passphrase in both, which is the one thing not to do with it.
+The file holds the word on its first line - the final newline, Unix or Windows,
+is not part of it. At a terminal with neither a file nor a variable, `wallet.mjs`
+asks for it and does not echo what you type:
+
+```sh
+node wallet.mjs --restore
+```
+
+`BIP39_PASSPHRASE` still works and is used when nothing else is given, printing a
+note that says so. Never write it inline (`BIP39_PASSPHRASE='...' node ...`):
+that records it in the process list and in your shell history.
 
 The passphrase is part of the wallet: a wrong or missing passphrase yields a
 different, empty set of addresses. Confirm by comparing address `#0` — or the
@@ -142,9 +150,12 @@ half-read. Older records without those lines still verify normally.
 | `--fingerprint PATH` | write the account, receive-chain and change-chain xpubs plus the first five addresses (or `--count N`) to `PATH` as a public record (`-` for stdout) |
 | `--expect-file PATH` | compare a restore against that record; needs `--restore`, exits 3 on a mismatch, and records the timestamp on success |
 | `--verify-state PATH` | where that timestamp goes (default `.wallet-verify-state.json`, git-ignored) |
+| `--passphrase-file PATH` | read the BIP-39 passphrase from the first line of `PATH`; at a terminal with no file or variable it is asked for without echo |
 | `-h`, `--help` | usage |
 
-Environment: `BIP39_PASSPHRASE` (default empty).
+Environment: `BIP39_PASSPHRASE` (default empty; `--passphrase-file` and
+`BIP39_PASSPHRASE_FILE` are preferred, since a variable is readable by other
+processes).
 
 ## Verify before you fund it
 

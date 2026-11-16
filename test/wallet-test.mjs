@@ -77,6 +77,44 @@ function runWallet(args, input = '', env = {}) {
   });
 }
 
+// Runs the CLI with stdin pretending to be a terminal, which is what makes it
+// ask for the passphrase. Raw mode is stubbed because the input is a pipe; the
+// reader still walks the same code, and a terminal would only add the tty flag.
+function runWalletPrompted(args, input = '', env = {}) {
+  const script = [
+    "Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });",
+    'process.stdin.setRawMode = () => {};',
+    `process.argv = ['node', 'wallet.mjs', ...${JSON.stringify(args)}];`,
+    `await import(${JSON.stringify(WALLET_URL)});`,
+  ].join('\n');
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
+      cwd: ROOT,
+      env: { ...process.env, BIP39_PASSPHRASE: '', BIP39_PASSPHRASE_FILE: '', ...env },
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    child.on('close', (code) => resolve({ code, stdout, stderr, out: stdout + stderr }));
+    child.stdin.end(input);
+  });
+}
+
+// Address #0 of a phrase at a given passphrase, derived here rather than by the
+// tool, so a wrong passphrase wiring shows up as a mismatch.
+function addressFor(phrase, passphrase, index = 0) {
+  const node = HDKey.fromMasterSeed(mnemonicToSeedSync(phrase, passphrase))
+    .derive("m/84'/0'/0'")
+    .deriveChild(0)
+    .deriveChild(index);
+  return bitcoin.payments.p2wpkh({ pubkey: Buffer.from(node.publicKey) }).address;
+}
+
 // Runs the CLI with stdout pretending to be a terminal. A real pty is not
 // available from here, so the child redefines isTTY before importing the tool
 // and supplies argv itself; everything after that is the real code path.
@@ -302,7 +340,7 @@ run = await runWallet(['--restore', '--expect-file', passPath], VECTOR);
 check('verifying it without the 25th word exits 3', run.code === 3, `exit ${run.code}`);
 check(
   'the message names the passphrase, not the phrase',
-  /made with a 25th word and BIP39_PASSPHRASE is not set/.test(run.out),
+  /made with a 25th word and none was supplied/.test(run.out),
   run.out,
 );
 check('and not the generic blame', !/phrase, the passphrase or the recorded value/.test(run.out), run.out);
@@ -317,7 +355,7 @@ check('a wrong 25th word still falls back to the generic blame', /phrase, the pa
 
 run = await runWallet(['--restore', '--expect-file', fpPath], VECTOR, { BIP39_PASSPHRASE: 'unwanted' });
 check('a 25th word against a no-passphrase record exits 3', run.code === 3, `exit ${run.code}`);
-check('and says to unset it', /made without a 25th word but BIP39_PASSPHRASE is set/.test(run.out), run.out);
+check('and says one was supplied anyway', /made without a 25th word but one was supplied/.test(run.out), run.out);
 
 console.log('\n== a record for somewhere else ==');
 const futurePath = join(fpDir, 'version-99.txt');
@@ -527,6 +565,73 @@ check('and is explained the same way', /testnet and this wallet restores mainnet
 
 run = await runWallet(['--restore', '--expect', accountXpub], VECTOR, { BIP39_PASSPHRASE: 'wrong' });
 check('a genuinely wrong passphrase still blames the passphrase', /passphrase or the recorded value is wrong/.test(run.out), run.out.trim());
+
+console.log('\n== the 25th word without the environment ==');
+const passDir = mkdtempSync(join(tmpdir(), 'wallet-passphrase-'));
+const withNewline = join(passDir, 'pass-newline.txt');
+const bare = join(passDir, 'pass-bare.txt');
+const crlf = join(passDir, 'pass-crlf.txt');
+writeFileSync(withNewline, 'x\n');
+writeFileSync(bare, 'x');
+writeFileSync(crlf, 'x\r\n');
+
+const addressLines = (out) => (out.match(/^ {2}#\d .*$/gm) ?? []).join('|');
+
+run = await runWallet(['--restore', '--count', '2'], VECTOR, { BIP39_PASSPHRASE: 'x' });
+const envAddresses = addressLines(run.out);
+check('the variable still restores a passphrased wallet', envAddresses.includes('bc1q') && run.code === 0, run.out);
+
+run = await runWallet(['--restore', '--count', '2', '--passphrase-file', withNewline], VECTOR, {
+  BIP39_PASSPHRASE: '',
+});
+check('a file restores the same wallet as the variable', addressLines(run.out) === envAddresses, run.out);
+
+run = await runWallet(['--restore', '--count', '2', '--passphrase-file', bare], VECTOR, { BIP39_PASSPHRASE: '' });
+check('and the file needs no final newline', addressLines(run.out) === envAddresses, run.out);
+
+run = await runWallet(['--restore', '--count', '2', '--passphrase-file', crlf], VECTOR, { BIP39_PASSPHRASE: '' });
+check('and a Windows line ending is not part of the word', addressLines(run.out) === envAddresses, run.out);
+
+run = await runWallet(['--restore', '--count', '2'], VECTOR, {
+  BIP39_PASSPHRASE: '',
+  BIP39_PASSPHRASE_FILE: withNewline,
+});
+check('BIP39_PASSPHRASE_FILE names a file too', addressLines(run.out) === envAddresses, run.out);
+
+run = await runWallet(['--restore', '--count', '2'], VECTOR, { BIP39_PASSPHRASE: '' });
+check('with none of the three, the addresses are the unpassphrased ones', run.out.includes(EXPECTED_0), run.out);
+
+run = await runWallet(['--restore', '--passphrase-file', join(passDir, 'missing.txt')], VECTOR);
+check('a missing passphrase file exits 1', run.code === 1, `exit ${run.code}`);
+check('and names the file', /cannot read the passphrase file .*missing\.txt/.test(run.out), run.out.trim());
+
+console.log('\n== reading the passphrase from the terminal ==');
+run = await runWalletPrompted(['--count', '1'], 'secret\r');
+check('the prompt exits 0', run.code === 0, `exit ${run.code}: ${run.out}`);
+check('it asks without saying what is typed', /BIP-39 passphrase \(empty for none\): /.test(run.out), run.out);
+check('the passphrase is not echoed', !run.out.includes('secret'), run.out);
+
+const promptedPhrase = (run.stdout.match(/^ {2}((?:[a-z]+ ){23}[a-z]+)$/m) ?? [])[1] ?? '';
+const promptedAddress = (run.stdout.match(/^ {2}#0 .*(bc1q[0-9a-z]+)$/m) ?? [])[1] ?? '';
+check('it generated a phrase', promptedPhrase.split(' ').length === 24, run.out);
+check(
+  'the typed word is the passphrase it used',
+  promptedAddress === addressFor(promptedPhrase, 'secret'),
+  `printed ${promptedAddress} vs derived ${addressFor(promptedPhrase, 'secret')}`,
+);
+
+run = await runWalletPrompted(['--count', '1'], '\r');
+const emptyPhrase = (run.stdout.match(/^ {2}((?:[a-z]+ ){23}[a-z]+)$/m) ?? [])[1] ?? '';
+const emptyAddress = (run.stdout.match(/^ {2}#0 .*(bc1q[0-9a-z]+)$/m) ?? [])[1] ?? '';
+check('an empty answer means no passphrase', emptyAddress === addressFor(emptyPhrase, ''), run.out);
+
+run = await runWalletPrompted(['--count', '1'], '\r', { BIP39_PASSPHRASE: 'x' });
+check('a variable in the environment suppresses the prompt', !/BIP-39 passphrase \(empty/.test(run.out), run.out);
+check('and says where it came from', /BIP39_PASSPHRASE comes from the environment/.test(run.out), run.out);
+
+run = await runWalletPrompted(['--count', '1'], '\r');
+check('with the prompt in use there is no environment note', !/comes from the environment/.test(run.out), run.out);
+rmSync(passDir, { recursive: true, force: true });
 
 console.log('\n== the check leaves a timestamp for the watchdog ==');
 // Run in a scratch directory so the state file does not land in the repository.

@@ -22,7 +22,9 @@
  *   node wallet.mjs --fingerprint F       write a public record to verify a backup
  *   node wallet.mjs --restore --expect-file F < seed.txt   check a backup against it
  *
- * A BIP-39 passphrase (the optional 25th word) is read from BIP39_PASSPHRASE.
+ * A BIP-39 passphrase (the optional 25th word) is read from --passphrase-file,
+ * BIP39_PASSPHRASE_FILE or BIP39_PASSPHRASE, or asked for at a terminal without
+ * echo - the environment is last because other processes can read it.
  */
 
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -71,6 +73,10 @@ function usage() {
   --verify-state PATH
                 where a successful --expect-file records its timestamp, for
                 watchdog.mjs (default ${VERIFY_STATE})
+  --passphrase-file PATH
+                read the BIP-39 passphrase (25th word) from the first line of
+                PATH; at a terminal with no file or variable, it is asked for
+                without echo
   --phrase-only print only the new seed phrase on stdout, one line and nothing
                 else, so 'node wallet.mjs --phrase-only > seed.txt' is a backup
                 that --restore accepts; generation only, never with --show-key,
@@ -89,7 +95,9 @@ function usage() {
                 and exits 3 when the phrase, the passphrase or the file is wrong
   -h, --help    show this help
 
-BIP-39 passphrase: set BIP39_PASSPHRASE in the environment.
+BIP-39 passphrase: --passphrase-file PATH, else BIP39_PASSPHRASE_FILE (a path),
+  else asked for at a terminal, else BIP39_PASSPHRASE (visible to other
+  processes). Empty by default.
 
 Exit codes: 0 ok, 1 usage or config error, 3 the restored wallet does not
             match --expect (nothing was printed that could be mistaken for
@@ -101,6 +109,7 @@ function parseArgs(argv) {
     count: null,
     showKey: false,
     allowTty: false,
+    passphraseFile: null,
     verifyState: VERIFY_STATE,
     restore: false,
     phraseOnly: false,
@@ -118,6 +127,11 @@ function parseArgs(argv) {
       opts.showKey = true;
     } else if (arg === '--allow-tty') {
       opts.allowTty = true;
+    } else if (arg === '--passphrase-file') {
+      const value = argv[i + 1];
+      if (value === undefined || value === '') fail('--passphrase-file needs a path');
+      opts.passphraseFile = value;
+      i += 1;
     } else if (arg === '--verify-state') {
       const value = argv[i + 1];
       if (value === undefined || value === '') fail('--verify-state needs a path');
@@ -179,7 +193,6 @@ function parseArgs(argv) {
   if (opts.phraseOnly && (opts.restore || opts.xpub !== null || opts.showKey || opts.fingerprint !== null)) {
     fail('--phrase-only writes a new seed phrase and nothing else, so it cannot be combined with --restore, --xpub, --show-key or --fingerprint');
   }
-
   return opts;
 }
 
@@ -192,6 +205,80 @@ async function readPhrase() {
   } finally {
     rl.close();
   }
+}
+
+// The 25th word is a second secret, so it is not echoed: raw mode when a
+// terminal is attached, and the plain stream otherwise.
+function readSecret(prompt) {
+  process.stderr.write(prompt);
+  const { stdin } = process;
+  const raw = typeof stdin.setRawMode === 'function';
+  if (raw) {
+    stdin.setRawMode(true);
+    stdin.resume();
+    stdin.setEncoding('utf8');
+  }
+
+  return new Promise((resolve) => {
+    let value = '';
+    const finish = () => {
+      stdin.off('data', onData);
+      if (raw) stdin.setRawMode(false);
+      stdin.pause();
+      process.stderr.write('\n');
+      resolve(value);
+    };
+    const onData = (chunk) => {
+      for (const char of chunk) {
+        if (char === '\r' || char === '\n') return finish();
+        if (char === '\u0003') {
+          process.stderr.write('\n');
+          process.exit(130);
+        }
+        if (char === '\u007f' || char === '\b') {
+          value = value.slice(0, -1);
+          continue;
+        }
+        value += char;
+      }
+    };
+    stdin.on('data', onData);
+    stdin.once('end', finish);
+  });
+}
+
+// A passphrase in the environment is visible to anything that can list this
+// process, so a file or a terminal answer comes first and the variable is kept
+// for whatever already sets it.
+async function resolvePassphrase(opts, { prompt = true } = {}) {
+  // An empty variable means "not set here", not "the empty passphrase": a shell
+  // that exported it once should not turn the prompt off.
+  const file = opts.passphraseFile ?? (process.env.BIP39_PASSPHRASE_FILE || null);
+  if (file !== null) {
+    let text;
+    try {
+      text = readFileSync(file, 'utf8');
+    } catch (err) {
+      fail(`cannot read the passphrase file ${file}: ${err.message}`);
+    }
+    // One line, without the newline the file editor added: a passphrase with a
+    // stray \n is a different passphrase.
+    return text.split('\n')[0].replace(/\r$/, '');
+  }
+
+  if (process.env.BIP39_PASSPHRASE) {
+    if (prompt) {
+      process.stderr.write(
+      'note: BIP39_PASSPHRASE comes from the environment, where other processes can read it;\n' +
+          '  --passphrase-file or answering the prompt keeps it out of there\n',
+      );
+    }
+    return process.env.BIP39_PASSPHRASE;
+  }
+
+  return prompt && process.stdin.isTTY
+    ? await readSecret('BIP-39 passphrase (empty for none): ')
+    : '';
 }
 
 // BIP-39 phrases are compared after Unicode normalization, case folding and
@@ -351,8 +438,8 @@ function resolveExpectation(expectation, { account, receive, change, passphrase 
         ok: expectation.value === actual,
         advice:
           expectation.value === 'required'
-            ? '  this record was made with a 25th word and BIP39_PASSPHRASE is not set - set it and run again'
-            : '  this record was made without a 25th word but BIP39_PASSPHRASE is set - unset it and run again',
+            ? '  this record was made with a 25th word and none was supplied - pass --passphrase-file, answer the prompt, or set BIP39_PASSPHRASE'
+            : '  this record was made without a 25th word but one was supplied - drop --passphrase-file, unset BIP39_PASSPHRASE, and answer the prompt with nothing',
       };
     }
 
@@ -536,7 +623,6 @@ function printAddresses(label, node, { chain = RECEIVE, count, network = NETWORK
 
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
-  const passphrase = process.env.BIP39_PASSPHRASE ?? '';
 
   // Both modes write a secret to stdout, and a terminal keeps it in scrollback -
   // the exact place these flags exist to keep it out of. A redirect or a pipe is
@@ -582,6 +668,9 @@ async function main() {
   // this writes the 24 words and nothing else - which makes `> seed.txt` a file
   // --restore accepts.
   if (opts.phraseOnly) {
+    // Phrase-only derives nothing, so it reads the passphrase to say whether one
+    // would be needed - never to ask for it.
+    const passphrase = await resolvePassphrase(opts, { prompt: false });
     if (passphrase) {
       process.stderr.write(
         'note: BIP39_PASSPHRASE is set, so this phrase alone restores a different wallet\n',
@@ -614,6 +703,8 @@ async function main() {
     mnemonic = generateMnemonic(256);
   }
 
+  // After the phrase, so an interactive run asks for the passphrase second.
+  const passphrase = await resolvePassphrase(opts);
   const { account, receive, change } = walletNodes(mnemonic, passphrase);
 
   if (opts.restore) {
