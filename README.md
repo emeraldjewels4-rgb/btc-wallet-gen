@@ -25,25 +25,20 @@ node wallet.mjs --show-key     # also print the WIF private key for address #0
 ```
 
 The seed phrase is printed to stdout once and never stored. To keep it out of
-your scrollback, redirect into encrypted storage you control. Redirecting the
+your scrollback, write it into encrypted storage you control. Redirecting the
 plain report gives you a file `--restore` will not accept, so use
-`--phrase-only`, which writes the 24 words and nothing else:
+`--phrase-only`, which writes the 24 words and nothing else - with `--out`, which
+creates the file itself instead of leaving its mode to the shell's umask:
 
 ```sh
-node wallet.mjs --phrase-only > /path/to/encrypted-volume/seed.txt
-```
-
-That file restores directly with `node wallet.mjs --restore < seed.txt`.
-`--phrase-only` refuses to run when stdout is a terminal, because printing the
-phrase there is what the flag exists to prevent; give it a redirect or a pipe.
-
-A redirect lands wherever the shell's umask puts it, so `--out` writes the file
-itself instead:
-
-```sh
-node wallet.mjs --phrase-only --out /path/to/seed.txt
+node wallet.mjs --phrase-only --out /path/to/encrypted-volume/seed.txt
 node wallet.mjs --restore --show-key --out /path/to/key.wif < seed.txt
 ```
+
+That file restores directly with `node wallet.mjs --restore < seed.txt`, or with
+`node wallet.mjs --restore --phrase-file seed.txt`, which refuses a phrase file
+that group or others can read. `--phrase-only` refuses to run when stdout is a
+terminal, because printing the phrase there is what the flag exists to prevent.
 
 `--out` creates the file rather than truncating one, so an existing backup is
 never silently replaced (exit `1`), and asks for mode `0600`. On POSIX that is
@@ -67,9 +62,14 @@ node wallet.mjs --restore        # or paste it at the prompt (input is echoed)
 `--phrase-file PATH` reads it from a named file instead, and asks the question
 `--out` answers on the way out: a file that group or others can read is refused,
 with its mode in the message, unless `--allow-loose-permissions` says to read it
-anyway. On Windows there are no modes to read, so it says the permissions could
-not be checked rather than passing them silently - keep the file on an encrypted
-volume there.
+anyway. It also asks who can replace it, since a `0600` file in a directory
+someone else can write to is only as private as the directory - anyone who can
+write there can delete it and put their own in its place, with whatever mode they
+like. Both refusals name the mode and how to fix it or how to insist; a sticky
+directory such as `/tmp` is fine, because there others cannot unlink a file they
+do not own. On Windows there are no modes to read, so it says the permissions
+could not be checked rather than passing them silently - keep the file on an
+encrypted volume there.
 
 ```sh
 chmod 600 seed.txt
@@ -206,7 +206,7 @@ half-read. Older records without those lines still verify normally.
 | `--spend-check` | prove a restored backup can spend, not only derive: sign a spend of address #0 offline and verify the signature against the address's own script; needs `--restore`, exits 3 if the key does not control the address |
 | `--phrase-only` | print only the new seed phrase on stdout, so a redirect is a restorable backup; generation only, never with `--show-key`, and refuses to run when stdout is a terminal unless `--out` is given |
 | `--out PATH` | write what `--show-key` or `--phrase-only` would print to `PATH`: created rather than truncated, mode `0600` |
-| `--phrase-file PATH` | read the seed phrase to restore from `PATH` instead of stdin; refused if group or others can read it |
+| `--phrase-file PATH` | read the seed phrase to restore from `PATH` instead of stdin; refused if group or others can read it, or can write the directory holding it |
 | `--allow-loose-permissions` | read such a `--phrase-file` anyway |
 | `--expect VALUE` | compare a restore against an xpub or address recorded earlier; needs `--restore`, exits 3 on a mismatch |
 | `--fingerprint PATH` | write the account, receive-chain and change-chain xpubs plus the first five addresses (or `--count N`) to `PATH` as a public record (`-` for stdout) |

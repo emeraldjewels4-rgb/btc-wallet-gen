@@ -12,7 +12,7 @@
 
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { appendFileSync, chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { readPermissionVerdict } from '../file-permissions.mjs';
 import { tmpdir } from 'node:os';
 import { spendProof } from '../spend-check.mjs';
@@ -291,11 +291,26 @@ console.log('\n== reading the phrase from a file ==');
 // The decision is checked here for every platform, since this machine can only
 // demonstrate one of them; the file itself follows.
 const fileMode = (bits) => 0o100000 | bits; // what fstat reports: file type plus mode
-let verdict = readPermissionVerdict({ path: 'seed.txt', mode: fileMode(0o644), platform: 'linux', allowLoose: false });
+const dirMode = (bits) => 0o040000 | bits; // likewise for a directory
+const verdictFor = (fileBits, parentBits, allowLoose = false) =>
+  readPermissionVerdict({
+    path: 'seed.txt',
+    mode: fileMode(fileBits),
+    dirPath: '/keys',
+    dirMode: dirMode(parentBits),
+    platform: 'linux',
+    allowLoose,
+  });
+let verdict = verdictFor(0o644, 0o700);
 check('a world-readable phrase file is refused', verdict.ok === false, JSON.stringify(verdict));
 check(
   'the refusal names the mode and both ways out',
   /mode 644/.test(verdict.reason) && /chmod 600/.test(verdict.reason) && /--allow-loose-permissions/.test(verdict.reason),
+  verdict.reason,
+);
+check(
+  'and points at the command that would have created it 0600',
+  /--phrase-only --out/.test(verdict.reason),
   verdict.reason,
 );
 check(
@@ -305,25 +320,45 @@ check(
 );
 check(
   'group-readable alone is enough to refuse',
-  readPermissionVerdict({ path: 's', mode: fileMode(0o640), platform: 'linux', allowLoose: false }).ok === false &&
-    readPermissionVerdict({ path: 's', mode: fileMode(0o604), platform: 'linux', allowLoose: false }).ok === false,
+  verdictFor(0o640, 0o700).ok === false && verdictFor(0o604, 0o700).ok === false,
+);
+check('0600 is accepted', verdictFor(0o600, 0o700).ok === true);
+check('so is 0400, which is all a read needs', verdictFor(0o400, 0o700).ok === true);
+check('the flag makes it a note, not a refusal', verdictFor(0o644, 0o700, true).ok === true);
+
+// A 0600 file can still be swapped for one whose mode the attacker chose.
+verdict = verdictFor(0o600, 0o777);
+check('a 0600 file in a world-writable directory is refused', verdict.ok === false, JSON.stringify(verdict));
+check(
+  'the refusal is about replacement, naming the directory',
+  /\/keys can be written by group or others \(mode 777\)/.test(verdict.reason) &&
+    /seed\.txt can be replaced/.test(verdict.reason),
+  verdict.reason,
 );
 check(
-  '0600 is accepted',
-  readPermissionVerdict({ path: 's', mode: fileMode(0o600), platform: 'linux', allowLoose: false }).ok === true,
+  'and says how to fix it or how to insist',
+  /chmod 700 \/keys/.test(verdict.reason) && /--allow-loose-permissions/.test(verdict.reason),
+  verdict.reason,
 );
+check('a group-writable directory is enough to refuse', verdictFor(0o600, 0o775).ok === false);
 check(
-  'so is 0400, which is all a read needs',
-  readPermissionVerdict({ path: 's', mode: fileMode(0o400), platform: 'linux', allowLoose: false }).ok === true,
+  'a sticky world-writable directory is not: others cannot unlink your file',
+  verdictFor(0o600, 0o1777).ok === true,
 );
+check('an ordinary 0755 directory is fine', verdictFor(0o600, 0o755).ok === true);
+check('and the flag carries the directory case too', verdictFor(0o600, 0o777, true).ok === true);
+
+verdict = readPermissionVerdict({
+  path: 'seed.txt',
+  mode: fileMode(0o666),
+  dirPath: '/keys',
+  dirMode: dirMode(0o700),
+  platform: 'win32',
+  allowLoose: false,
+});
 check(
-  'the flag makes it a note, not a refusal',
-  readPermissionVerdict({ path: 's', mode: fileMode(0o644), platform: 'linux', allowLoose: true }).ok === true,
-);
-verdict = readPermissionVerdict({ path: 'seed.txt', mode: fileMode(0o666), platform: 'win32', allowLoose: false });
-check(
-  'Windows cannot tell, and says so instead of passing silently',
-  verdict.ok === true && /could not be checked/.test(verdict.note ?? ''),
+  'Windows cannot tell, and says so about reading or replacing',
+  verdict.ok === true && /could not be checked/.test(verdict.note ?? '') && /read or replace/.test(verdict.note ?? ''),
   JSON.stringify(verdict),
 );
 
@@ -340,8 +375,37 @@ if (process.platform === 'win32') {
   run = await runWallet(['--restore', '--count', '1', '--phrase-file', phraseFile], '');
   check('a group-or-other readable file exits 1', run.code === 1, `exit ${run.code}: ${run.out}`);
   check('and says how to fix it', /chmod 600/.test(run.out), run.out.trim());
+  check('naming --phrase-only --out as the way to a 0600 file', /--phrase-only --out/.test(run.out), run.out.trim());
   run = await runWallet(['--restore', '--count', '1', '--phrase-file', phraseFile, '--allow-loose-permissions'], '');
   check('the flag reads it anyway', run.code === 0 && run.out.includes(EXPECTED_0), `exit ${run.code}: ${run.out}`);
+
+  // The same 0600 file, in a directory someone else can write to.
+  const openDir = join(phraseDir, 'open');
+  mkdirSync(openDir);
+  chmodSync(openDir, 0o777);
+  writeFileSync(join(openDir, 'seed.txt'), `${VECTOR}\n`);
+  chmodSync(join(openDir, 'seed.txt'), 0o600);
+  run = await runWallet(['--restore', '--count', '1', '--phrase-file', join(openDir, 'seed.txt')], '');
+  check('a 0600 file in a writable directory exits 1', run.code === 1, `exit ${run.code}: ${run.out}`);
+  check('and names the directory that can be written', /can be written by group or others/.test(run.out), run.out.trim());
+  run = await runWallet(
+    ['--restore', '--count', '1', '--phrase-file', join(openDir, 'seed.txt'), '--allow-loose-permissions'],
+    '',
+  );
+  check('the flag reads it there too', run.code === 0 && run.out.includes(EXPECTED_0), `exit ${run.code}: ${run.out}`);
+
+  // The refusal must come before the bytes are read. A directory cannot be read at
+  // all, so if the contents were read first this would report the read error
+  // instead of the permissions, which is how the ordering used to be wrong.
+  const looseDir = join(phraseDir, 'loose');
+  mkdirSync(looseDir);
+  chmodSync(looseDir, 0o755);
+  run = await runWallet(['--restore', '--phrase-file', looseDir], '');
+  check(
+    'a refused path is never read into memory',
+    /readable by group or others/.test(run.out) && !/EISDIR|illegal operation on a directory/i.test(run.out),
+    run.out.trim(),
+  );
 }
 
 writeFileSync(phraseFile, `${VECTOR}\r\n`);
@@ -701,7 +765,7 @@ run = await runWallet(['--restore'], report.stdout);
 check('feeding the whole report exits 1', run.code === 1, `exit ${run.code}`);
 check('it names the input as the report', /full report from wallet\.mjs/.test(run.out), run.out.trim());
 check('it says the phrase is the 24-word line inside it', /24-word line inside it/.test(run.out), run.out.trim());
-check('it points at --phrase-only', /--phrase-only/.test(run.out), run.out.trim());
+check('it points at --phrase-only --out', /--phrase-only --out seed\.txt/.test(run.out), run.out.trim());
 check('the generic phrase error is not used', !/not a valid BIP-39 seed phrase/.test(run.out), run.out.trim());
 
 const phraseLine = (report.stdout.match(/^ {2}([a-z]+ ){23}[a-z]+$/m) ?? [''])[0].trim();
@@ -715,7 +779,7 @@ check('and is not mistaken for a report', /not a valid BIP-39 seed phrase/.test(
 console.log('\n== secrets refuse a terminal ==');
 run = await runWalletOnTerminal(['--phrase-only']);
 check('--phrase-only on a terminal exits 1', run.code === 1, `exit ${run.code}`);
-check('it names the redirect', /redirect it/.test(run.out), run.out.trim());
+check('it names the command that writes a 0600 file', /--phrase-only --out seed\.txt/.test(run.out), run.out.trim());
 check('and no phrase reaches stdout', run.stdout.trim() === '', JSON.stringify(run.stdout));
 
 run = await runWalletOnTerminal(['--restore', '--show-key'], VECTOR);

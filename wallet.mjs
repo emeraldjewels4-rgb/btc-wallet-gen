@@ -31,7 +31,7 @@ import { closeSync, fstatSync, openSync, readFileSync, statSync, writeFileSync }
 import { BACKUP_STATE_DEFAULT, recordDigest } from './backup-state.mjs';
 import { readPermissionVerdict } from './file-permissions.mjs';
 import { createInterface } from 'node:readline/promises';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { spendProof } from './spend-check.mjs';
 import { generateMnemonic, mnemonicToSeedSync, validateMnemonic } from 'bip39';
 import { HDKey } from '@scure/bip32';
@@ -89,8 +89,8 @@ function usage() {
                 PATH; at a terminal with no file or variable, it is asked for
                 without echo
   --phrase-only print only the new seed phrase on stdout, one line and nothing
-                else, so 'node wallet.mjs --phrase-only > seed.txt' is a backup
-                that --restore accepts; generation only, never with --show-key,
+                else, so 'node wallet.mjs --phrase-only --out seed.txt' is a
+                backup that --restore accepts; generation only, never with --show-key,
                 and it refuses to run when stdout is a terminal
   --expect VALUE check the restored wallet against an xpub, tpub or address
                 recorded when it was created (either chain); a mismatch exits 3, so a wrong
@@ -327,7 +327,8 @@ async function resolvePassphrase(opts, { prompt = true } = {}) {
 
 // The phrase is only as private as the file holding it. --out asks for 0600 on
 // the way out; this is the same question asked on the way in, of the file
-// descriptor so that the file which was checked is the file that is read.
+// descriptor so that the file which was checked is the file that is read - and
+// asked before the bytes are read, so a refused file is never opened into memory.
 function readPhraseFile(path, allowLoose) {
   let fd;
   try {
@@ -337,20 +338,49 @@ function readPhraseFile(path, allowLoose) {
   }
 
   let info;
-  let text;
   try {
     info = fstatSync(fd);
-    text = readFileSync(fd, 'utf8');
+  } catch (err) {
+    closeSync(fd);
+    fail(`cannot read --phrase-file ${path}: ${err.message}`);
+  }
+
+  // Who can replace it matters as much as who can read it, and that is the
+  // directory's answer. Windows reports neither, which the verdict says.
+  let dirMode = 0;
+  const dirPath = dirname(resolve(path));
+  if (process.platform !== 'win32') {
+    try {
+      dirMode = statSync(dirPath).mode;
+    } catch (err) {
+      closeSync(fd);
+      fail(`cannot check the permissions of ${dirPath}: ${err.message}`);
+    }
+  }
+
+  const verdict = readPermissionVerdict({
+    path,
+    mode: info.mode,
+    dirPath,
+    dirMode,
+    platform: process.platform,
+    allowLoose,
+  });
+  if (verdict.note) process.stderr.write(verdict.note);
+  if (!verdict.ok) {
+    closeSync(fd);
+    fail(verdict.reason);
+  }
+
+  // Everything above is a decision about the file; the phrase only enters memory
+  // once that decision is yes.
+  try {
+    return readFileSync(fd, 'utf8');
   } catch (err) {
     fail(`cannot read --phrase-file ${path}: ${err.message}`);
   } finally {
     closeSync(fd);
   }
-
-  const verdict = readPermissionVerdict({ path, mode: info.mode, platform: process.platform, allowLoose });
-  if (verdict.note) process.stderr.write(verdict.note);
-  if (!verdict.ok) fail(verdict.reason);
-  return text;
 }
 
 // BIP-39 phrases are compared after Unicode normalization, case folding and
@@ -743,7 +773,10 @@ async function main() {
     // With --out the secret goes to a file the tool made, not to the terminal,
     // so these refusals have nothing left to protect.
     if (opts.phraseOnly && opts.out === null) {
-      fail('--phrase-only refuses to print the seed phrase to a terminal - redirect it, e.g. node wallet.mjs --phrase-only > seed.txt');
+      fail(
+        '--phrase-only refuses to print the seed phrase to a terminal - ' +
+          'write it with node wallet.mjs --phrase-only --out seed.txt instead',
+      );
     }
     if (opts.showKey && !opts.allowTty && opts.out === null) {
       fail('--show-key would print a private key to this terminal - redirect the output, or pass --allow-tty to print it anyway');
@@ -809,8 +842,8 @@ async function main() {
       fail(
         'that input is the full report from wallet.mjs, not a seed phrase\n' +
           '  the phrase is the 24-word line inside it - extract just that line\n' +
-          '  or generate again with --phrase-only, which writes only the words, so\n' +
-          '  node wallet.mjs --phrase-only > seed.txt is a file --restore accepts directly',
+          '  or generate again with --phrase-only --out seed.txt, which writes only\n' +
+          '  the words and creates the file 0600, so --restore accepts it directly',
       );
     }
     if (!validateMnemonic(mnemonic)) {
