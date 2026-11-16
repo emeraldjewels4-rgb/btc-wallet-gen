@@ -200,7 +200,7 @@ half-read. Older records without those lines still verify normally.
 | `--count N` | how many addresses to cover, 1-20: printed (default 1), or recorded and searched by `--fingerprint` and `--expect` (default 5) |
 | `--show-key` | also print the WIF private key for address #0; refused when stdout is a terminal unless `--allow-tty` is passed |
 | `--allow-tty` | print that private key to a terminal anyway |
-| `--spend-check` | prove a restored backup can spend, not only derive: sign a spend of address #0 offline, verify the signature, discard the transaction; needs `--restore`, exits 3 if the key cannot sign |
+| `--spend-check` | prove a restored backup can spend, not only derive: sign a spend of address #0 offline and verify the signature against the address's own script; needs `--restore`, exits 3 if the key does not control the address |
 | `--phrase-only` | print only the new seed phrase on stdout, so a redirect is a restorable backup; generation only, never with `--show-key`, and refuses to run when stdout is a terminal unless `--out` is given |
 | `--out PATH` | write what `--show-key` or `--phrase-only` would print to `PATH`: created rather than truncated, mode `0600` |
 | `--phrase-file PATH` | read the seed phrase to restore from `PATH` instead of stdin; refused if group or others can read it |
