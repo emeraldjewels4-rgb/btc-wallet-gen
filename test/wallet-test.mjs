@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HDKey } from '@scure/bip32';
+import * as bitcoin from 'bitcoinjs-lib';
 import { mnemonicToSeedSync } from 'bip39';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -176,6 +177,46 @@ check('the refusal prints no phrase', run.stdout === '', JSON.stringify(run.stdo
 run = await runWallet(['--phrase-only', '--xpub', accountXpub]);
 check('--phrase-only with --xpub exits 1', run.code === 1, `exit ${run.code}`);
 
+console.log('\n== change chain ==');
+// Derived here from the same seed with the same libraries, independently of the
+// tool's own path, so a wrong chain constant shows up as a mismatch.
+const accountNode = HDKey.fromMasterSeed(mnemonicToSeedSync(VECTOR)).derive("m/84'/0'/0'");
+const changeNode = accountNode.deriveChild(1);
+const changeAddressAt = (index) =>
+  bitcoin.payments.p2wpkh({ pubkey: Buffer.from(changeNode.deriveChild(index).publicKey) }).address;
+
+run = await runWallet(['--restore', '--count', '2'], VECTOR);
+check(
+  'the report shows a change chain',
+  /Change addresses \(m\/84'\/0'\/0'\/1, never handed out\):/.test(run.out),
+  run.out,
+);
+check('with the change path spelled out', /#0\s+m\/84'\/0'\/0'\/1\/0\s+bc1q/.test(run.out), run.out);
+check(
+  'and the addresses the chain derives',
+  run.out.includes(changeAddressAt(0)) && run.out.includes(changeAddressAt(1)),
+  run.out,
+);
+check('which are not the receive addresses', changeAddressAt(0) !== EXPECTED_0, changeAddressAt(0));
+
+run = await runWallet(['--xpub', receiveXpub]);
+check(
+  'a receive-chain xpub says the change chain is out of reach',
+  /Change addresses: unavailable from a receive-chain xpub/.test(run.out),
+  run.out,
+);
+
+run = await runWallet(['--xpub', accountXpub, '--count', '1']);
+check('an account xpub does derive it', run.out.includes(changeAddressAt(0)), run.out);
+
+run = await runWallet(['--restore', '--expect', changeNode.publicExtendedKey], VECTOR);
+check('the change-chain xpub verifies on its own', run.code === 0, `exit ${run.code}: ${run.out}`);
+check('and is named as such', /matches --expect \(change-chain xpub\)/.test(run.out), run.out);
+
+run = await runWallet(['--restore', '--expect', changeAddressAt(0)], VECTOR);
+check('a change address verifies too', run.code === 0, `exit ${run.code}: ${run.out}`);
+check('and is reported as a change address', /matches --expect \(change #0\)/.test(run.out), run.out);
+
 console.log('\n== fingerprint record ==');
 const fpDir = mkdtempSync(join(tmpdir(), 'wallet-fingerprint-'));
 const fpPath = join(fpDir, 'wallet-fingerprint.txt');
@@ -186,6 +227,18 @@ check('it says the file is safe to commit', /safe to commit/.test(run.stderr), r
 const fpText = readFileSync(fpPath, 'utf8');
 check('the record holds the account xpub', fpText.includes(accountXpub), fpText.split('\n')[6]);
 check('the record holds the receive-chain xpub', fpText.includes(receiveXpub), fpText.split('\n')[7]);
+check('the record holds the change-chain xpub', fpText.includes(changeNode.publicExtendedKey), fpText);
+check(
+  'and it is labelled as such',
+  /^change-chain-xpub: xpub/m.test(fpText),
+  fpText,
+);
+
+const wrongChangePath = join(fpDir, 'change-swapped.txt');
+writeFileSync(wrongChangePath, fpText.replace(/^change-chain-xpub: \S+$/m, `change-chain-xpub: ${receiveXpub}`));
+run = await runWallet(['--restore', '--expect-file', wrongChangePath], VECTOR);
+check('a record pinning the wrong change-chain xpub exits 3', run.code === 3, `exit ${run.code}`);
+check('and names that field', /change-chain xpub/.test(run.out), run.out);
 check('the record holds address #0', fpText.includes(EXPECTED_0), fpText);
 check('the record holds address #1', fpText.includes(EXPECTED_1), fpText);
 check('the record holds three addresses', (fpText.match(/^address #\d+: /gm) ?? []).length === 3, fpText);
@@ -208,13 +261,17 @@ check('a five-address record verifies all five', run.code === 0, `exit ${run.cod
 check('and summarises the range', /addresses #0\.\.#4/.test(run.out), run.out);
 
 run = await runWallet(['--xpub', accountXpub]);
-check('an xpub with no --count prints one address', (run.stdout.match(/^ {2}#\d+ /gm) ?? []).length === 1, run.stdout);
-check('and it is address #0', run.stdout.includes(EXPECTED_0), run.stdout);
+check(
+  'an xpub with no --count prints one address per chain',
+  (run.stdout.match(/^ {2}#\d+ /gm) ?? []).length === 2,
+  run.stdout,
+);
+check('the receive one is #0', run.stdout.includes(EXPECTED_0), run.stdout);
 
 run = await runWallet([]);
 check(
-  'the report still prints one address by default',
-  (run.stdout.match(/^ {2}#\d+ /gm) ?? []).length === 1,
+  'the report still prints one address per chain by default',
+  (run.stdout.match(/^ {2}#\d+ /gm) ?? []).length === 2,
   run.stdout,
 );
 
@@ -281,13 +338,17 @@ writeFileSync(
 );
 run = await runWallet(['--restore', '--expect-file', legacyPath], VECTOR);
 check('a record without provenance still verifies', run.code === 0, `exit ${run.code}: ${run.out}`);
-check('and says only what it checked', /matches --expect-file .*\(account xpub, receive-chain xpub, addresses #0\.\.#2\)/.test(run.out), run.out);
+check(
+  'and says only what it checked',
+  /matches --expect-file .*\(account xpub, receive-chain xpub, change-chain xpub, addresses #0\.\.#2\)/.test(run.out),
+  run.out,
+);
 
 run = await runWallet(['--restore', '--expect-file', fpPath], VECTOR);
 check('a matching record verifies', run.code === 0, `exit ${run.code}: ${run.out}`);
 check(
   'and lists what it checked',
-  /matches --expect-file .*\(derivation path, BIP-39 passphrase, account xpub, receive-chain xpub, addresses #0\.\.#2\)/.test(
+  /matches --expect-file .*\(derivation path, BIP-39 passphrase, account xpub, receive-chain xpub, change-chain xpub, addresses #0\.\.#2\)/.test(
     run.out,
   ),
   run.out,
@@ -421,7 +482,7 @@ run = await runWallet(['--restore', '--count', '2', '--expect', vectorAddress2],
 check('an address outside an explicit --count exits 3', run.code === 3, `exit ${run.code}`);
 check(
   'the mismatch shows both sides',
-  /expected\s+bc1q/.test(run.out) && /restored\s+no match in #0\.\.#1/.test(run.out),
+  /expected\s+bc1q/.test(run.out) && /restored\s+no match on either chain in #0\.\.#1/.test(run.out),
   run.out,
 );
 
@@ -430,7 +491,7 @@ run = await runWallet(['--restore', '--expect', missingAddress], VECTOR);
 check('an address in no slot of the default window exits 3', run.code === 3, `exit ${run.code}`);
 check(
   'and says where it looked, with #0 as the sample',
-  /restored\s+no match in #0\.\.#4; #0 is bc1q[0-9a-z]{38}$/m.test(run.out),
+  /restored\s+no match on either chain in #0\.\.#4; #0 is bc1q[0-9a-z]{38}$/m.test(run.out),
   run.out,
 );
 

@@ -82,8 +82,9 @@ node wallet.mjs --restore --expect xpub6... < seed.txt
 node wallet.mjs --restore --expect bc1q... < seed.txt
 ```
 
-`--expect` takes an account or receive-chain xpub (`xpub`/`tpub`) or a bech32
-address, looked for among the addresses `--count` covers (five by default),
+`--expect` takes an account, receive-chain or change-chain xpub
+(`xpub`/`tpub`) or a bech32 address, looked for among the addresses `--count`
+covers (five by default) on either chain,
 needs `--restore`, and exits `3` on a mismatch, showing what the phrase actually
 derives beside what you expected. A mistyped phrase that still passes the
 checksum, a missing 25th word, or a backup of a different wallet all fail here,
@@ -108,6 +109,13 @@ is not a fingerprint. A record trimmed down to the two xpubs still verifies what
 it keeps. The file is safe to commit but not private: it ties those addresses
 together and reveals their balances to anyone who reads it.
 
+The record pins the change chain too (`change-chain-xpub`), which matters after a
+restore: a wallet whose funds have moved to change addresses shows up under
+`Change addresses (m/84'/0'/0'/1, never handed out)` in every report, so it does
+not look like the wrong wallet. A receive-chain xpub cannot derive its sibling
+chain, so `--xpub` with one says the change addresses are out of reach rather
+than leaving them out silently; pass the account key to see them.
+
 The record also carries `fingerprint-version`, `path` and `passphrase`, so the
 check can say what actually went wrong: a missing 25th word is named as such
 instead of being blamed on the phrase, a record made for a different derivation
@@ -125,7 +133,7 @@ half-read. Older records without those lines still verify normally.
 | `--allow-tty` | print that private key to a terminal anyway |
 | `--phrase-only` | print only the new seed phrase on stdout, so a redirect is a restorable backup; generation only, never with `--show-key`, and refuses to run when stdout is a terminal |
 | `--expect VALUE` | compare a restore against an xpub or address recorded earlier; needs `--restore`, exits 3 on a mismatch |
-| `--fingerprint PATH` | write the account xpub, receive-chain xpub and first five addresses (or `--count N`) to `PATH` as a public record (`-` for stdout) |
+| `--fingerprint PATH` | write the account, receive-chain and change-chain xpubs plus the first five addresses (or `--count N`) to `PATH` as a public record (`-` for stdout) |
 | `--expect-file PATH` | compare a restore against that record; needs `--restore`, exits 3 on a mismatch |
 | `-h`, `--help` | usage |
 

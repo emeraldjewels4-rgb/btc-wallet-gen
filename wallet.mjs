@@ -34,6 +34,7 @@ import { encode as encodeWIF } from 'wif';
 const NETWORK = bitcoin.networks.bitcoin;
 const COIN = "m/84'/0'/0'"; // BIP-84 account: native SegWit, account 0
 const RECEIVE = 0; // external chain: addresses handed out to payers
+const CHANGE = 1; // internal chain: change from spending, never handed out
 // Same meaning as in the treasury tools: a safety check said no. Used when the
 // restored wallet does not match the value recorded for it.
 const EXIT_MISMATCH = 3;
@@ -68,12 +69,12 @@ function usage() {
                 that --restore accepts; generation only, never with --show-key,
                 and it refuses to run when stdout is a terminal
   --expect VALUE check the restored wallet against an xpub, tpub or address
-                recorded when it was created; a mismatch exits 3, so a wrong
+                recorded when it was created (either chain); a mismatch exits 3, so a wrong
                 phrase or passphrase fails instead of looking like a restore
   --fingerprint PATH
-                write the account xpub, receive-chain xpub and the first five
-                addresses (--count N to change) to PATH as a public record (no
-                secret in it)
+                write the account, receive-chain and change-chain xpubs plus the
+                first five addresses (--count N to change) to PATH as a public
+                record (no secret in it)
                 that --expect-file can check a backup against years later; '-'
                 writes it to stdout instead
   --expect-file PATH
@@ -193,19 +194,19 @@ function looksLikeReport(text) {
   return /Seed phrase \(BIP-39,?\s*\d+ words\)/.test(text) || /Receive-chain xpub:/.test(text);
 }
 
-// Returns both nodes: --expect may be given either the account xpub
-// (m/84'/COIN'/0') or the receive-chain one (m/84'/COIN'/0'/0), and @scure/bip32
-// does not keep a link back to the parent.
-function receiveNode(mnemonic, passphrase) {
+// The account and both chains. --expect may be given any of the three xpubs, and
+// @scure/bip32 does not keep a link back to the parent, so they are returned
+// together rather than derived from each other later.
+function walletNodes(mnemonic, passphrase) {
   const seed = mnemonicToSeedSync(mnemonic, passphrase);
   const account = HDKey.fromMasterSeed(seed).derive(COIN);
-  return { account, receive: account.deriveChild(RECEIVE) };
+  return { account, receive: account.deriveChild(RECEIVE), change: account.deriveChild(CHANGE) };
 }
 
 // The public record a backup is checked against years later: account xpub,
 // receive-chain xpub and the first addresses. No phrase, no key, so it can be
 // committed - though it does tie those addresses and their balances together.
-function fingerprintText({ account, receive, count, passphrase }) {
+function fingerprintText({ account, receive, change, count, passphrase }) {
   const lines = [
     '# wallet.mjs fingerprint - public data, safe to commit: no phrase, no private key.',
     '# It does reveal these addresses and their balances to whoever reads it.',
@@ -219,9 +220,10 @@ function fingerprintText({ account, receive, count, passphrase }) {
     `passphrase: ${passphrase ? 'required' : 'none'}`,
     `account-xpub: ${account.publicExtendedKey}`,
     `receive-chain-xpub: ${receive.publicExtendedKey}`,
+    `change-chain-xpub: ${change.publicExtendedKey}`,
   ];
   for (let i = 0; i < count; i += 1) {
-    lines.push(`address #${i}: ${receiveAddress(receive, i).address}`);
+    lines.push(`address #${i}: ${addressAt(receive, i).address}`);
   }
   return `${lines.join('\n')}\n`;
 }
@@ -233,6 +235,7 @@ function parseFingerprint(text) {
     passphrase: null,
     accountXpub: null,
     receiveXpub: null,
+    changeXpub: null,
     addresses: [],
   };
   for (const line of text.split(/\r?\n/)) {
@@ -246,6 +249,7 @@ function parseFingerprint(text) {
     else if (key === 'passphrase') fields.passphrase = value;
     else if (key === 'account-xpub') fields.accountXpub = value;
     else if (key === 'receive-chain-xpub') fields.receiveXpub = value;
+    else if (key === 'change-chain-xpub') fields.changeXpub = value;
     else if (/^address #\d+$/.test(key)) fields.addresses.push([Number(key.slice('address #'.length)), value]);
   }
   fields.addresses.sort((a, b) => a[0] - b[0]);
@@ -275,7 +279,8 @@ function expectationsFor(opts) {
         ' - use the wallet.mjs that wrote it, or re-record the wallet with this one',
     );
   }
-  const walletFields = fields.accountXpub !== null || fields.receiveXpub !== null || fields.addresses.length > 0;
+  const walletFields =
+    fields.accountXpub !== null || fields.receiveXpub !== null || fields.changeXpub !== null || fields.addresses.length > 0;
   if (!walletFields) {
     fail(`${opts.expectFile} is not a wallet fingerprint (no account-xpub, receive-chain-xpub or address lines)`);
   }
@@ -289,6 +294,7 @@ function expectationsFor(opts) {
   }
   if (fields.accountXpub !== null) expectations.push({ kind: 'account-xpub', value: fields.accountXpub });
   if (fields.receiveXpub !== null) expectations.push({ kind: 'receive-xpub', value: fields.receiveXpub });
+  if (fields.changeXpub !== null) expectations.push({ kind: 'change-xpub', value: fields.changeXpub });
   for (const [index, value] of fields.addresses) expectations.push({ kind: 'address', index, value });
   return expectations;
 }
@@ -312,7 +318,7 @@ function testnetAdvice() {
   return `  that value is testnet and this wallet restores mainnet only (${COIN}); compare it against the mainnet xpub or a bc1 address`;
 }
 
-function resolveExpectation(expectation, { account, receive, passphrase }) {
+function resolveExpectation(expectation, { account, receive, change, passphrase }) {
   switch (expectation.kind) {
     case 'path':
       return {
@@ -343,12 +349,21 @@ function resolveExpectation(expectation, { account, receive, passphrase }) {
     case 'receive-xpub':
       return sameValue('receive-chain xpub', expectation.value, receive.publicExtendedKey);
 
+    case 'change-xpub':
+      return sameValue(
+        'change-chain xpub',
+        expectation.value,
+        // A receive-chain xpub has no parent here, so its sibling is unknown.
+        change === null ? 'unavailable from a receive-chain xpub' : change.publicExtendedKey,
+      );
+
     case 'xpub': {
       // A bare xpub is accepted at either depth, so both are candidates and the
       // label reports which one matched.
       const candidates = [
         ['account xpub', account.publicExtendedKey],
         ['receive-chain xpub', receive.publicExtendedKey],
+        ...(change === null ? [] : [['change-chain xpub', change.publicExtendedKey]]),
       ];
       const match = candidates.find(([, actual]) => actual === expectation.value);
       return {
@@ -364,24 +379,32 @@ function resolveExpectation(expectation, { account, receive, passphrase }) {
       return sameValue(
         `address #${expectation.index}`,
         expectation.value,
-        receiveAddress(receive, expectation.index).address,
+        addressAt(receive, expectation.index).address,
       );
 
     case 'address-any': {
-      // A bare address may sit at any index in the window. When none matches,
-      // listing the addresses it was compared with adds nothing - they are all
-      // known not to be the one asked for - so the range and a sample suffice.
-      const seen = Array.from({ length: expectation.limit }, (_, index) => ({
-        index,
-        address: receiveAddress(receive, index).address,
-      }));
+      // A bare address may be on either chain, at any index in the window - a
+      // change address is still this wallet. When none matches, listing what was
+      // compared adds nothing, so the range and a sample suffice.
+      const seen = [
+        ...Array.from({ length: expectation.limit }, (_, index) => ({
+          label: `address #${index}`,
+          address: addressAt(receive, index).address,
+        })),
+        ...(change === null
+          ? []
+          : Array.from({ length: expectation.limit }, (_, index) => ({
+              label: `change #${index}`,
+              address: addressAt(change, index, CHANGE).address,
+            }))),
+      ];
       const match = seen.find(({ address }) => address === expectation.value);
       return {
-        label: match ? `address #${match.index}` : `address #0..#${expectation.limit - 1}`,
+        label: match ? match.label : `address #0..#${expectation.limit - 1}`,
         expected: expectation.value,
         actual: match
           ? match.address
-          : `no match in #0..#${expectation.limit - 1}; #0 is ${seen[0].address}`,
+          : `no match on either chain in #0..#${expectation.limit - 1}; #0 is ${seen[0].address}`,
         ok: Boolean(match),
         advice: /^tb1/.test(expectation.value) ? testnetAdvice() : undefined,
       };
@@ -437,7 +460,7 @@ const XPUB_VERSIONS = {
 
 // Accepts an account key (m/84'/COIN'/0') or its receive chain
 // (m/84'/COIN'/0'/0), from an xpub (mainnet) or tpub (testnet).
-function xpubReceiveNode(xpub) {
+function xpubNodes(xpub) {
   const prefix = xpub.slice(0, 4).toLowerCase();
   if (prefix === 'xprv' || prefix === 'tprv') {
     fail('that is an extended private key; pass its matching xpub (or tpub) instead');
@@ -455,20 +478,34 @@ function xpubReceiveNode(xpub) {
 
   const network = kind === 'mainnet' ? NETWORK : TESTNET;
   const account = `m/84'/${kind === 'mainnet' ? 0 : 1}'/0'`;
-  if (node.depth === 3) return { receive: node.deriveChild(RECEIVE), network, account, kind };
-  if (node.depth === 4) return { receive: node, network, account, kind };
+  if (node.depth === 3) {
+    return { receive: node.deriveChild(RECEIVE), change: node.deriveChild(CHANGE), network, account, kind };
+  }
+  if (node.depth === 4) {
+    // The change chain is a sibling of the receive chain; a depth-4 key has no
+    // parent here to reach it from.
+    return { receive: node, change: null, network, account, kind };
+  }
   fail(
     `unsupported xpub depth ${node.depth}; pass the account key (${account}) ` +
       `or its receive chain (${account}/${RECEIVE})`,
   );
 }
 
-function receiveAddress(node, index, network = NETWORK, account = COIN) {
+function addressAt(node, index, chain = RECEIVE, network = NETWORK, account = COIN) {
   const child = node.deriveChild(index);
   const pubkey = Buffer.from(child.publicKey);
   const { address } = bitcoin.payments.p2wpkh({ pubkey, network });
   if (!address) fail(`could not encode an address for index ${index}`);
-  return { address, child, path: `${account}/${RECEIVE}/${index}` };
+  return { address, child, path: `${account}/${chain}/${index}` };
+}
+
+function printAddresses(label, node, { chain = RECEIVE, count, network = NETWORK, account = COIN }) {
+  console.log(label);
+  for (let i = 0; i < count; i += 1) {
+    const { address, path } = addressAt(node, i, chain, network, account);
+    console.log(`  #${i}  ${path.padEnd(18)}  ${address}`);
+  }
 }
 
 async function main() {
@@ -492,15 +529,22 @@ async function main() {
   const shownCount = opts.count ?? 1;
 
   if (opts.xpub !== null) {
-    const { receive, network, account, kind } = xpubReceiveNode(opts.xpub);
+    const { receive, change, network, account, kind } = xpubNodes(opts.xpub);
     console.log('Derived from an extended public key - public data only.');
     console.log('');
     console.log(`Account ${account} - BIP-84 native SegWit (bech32), Bitcoin ${kind}`);
     console.log('');
-    console.log('Receive addresses:');
-    for (let i = 0; i < shownCount; i += 1) {
-      const { address, path } = receiveAddress(receive, i, network, account);
-      console.log(`  #${i}  ${path.padEnd(18)}  ${address}`);
+    printAddresses('Receive addresses:', receive, { count: shownCount, network, account });
+    console.log('');
+    if (change === null) {
+      console.log('Change addresses: unavailable from a receive-chain xpub - pass the account key to derive them.');
+    } else {
+      printAddresses(`Change addresses (${account}/${CHANGE}, never handed out):`, change, {
+        chain: CHANGE,
+        count: shownCount,
+        network,
+        account,
+      });
     }
     console.log('');
     console.log('Watch-only: an xpub yields addresses only, never a private key.');
@@ -544,7 +588,7 @@ async function main() {
     mnemonic = generateMnemonic(256);
   }
 
-  const { account, receive } = receiveNode(mnemonic, passphrase);
+  const { account, receive, change } = walletNodes(mnemonic, passphrase);
 
   if (opts.restore) {
     const wordCount = mnemonic.split(' ').length;
@@ -563,14 +607,15 @@ async function main() {
 
   console.log(`Account ${COIN} - BIP-84 native SegWit (bech32), Bitcoin mainnet`);
   console.log('');
-  console.log('Receive addresses:');
-  for (let i = 0; i < shownCount; i += 1) {
-    const { address, path } = receiveAddress(receive, i);
-    console.log(`  #${i}  ${path.padEnd(18)}  ${address}`);
-  }
+  printAddresses('Receive addresses:', receive, { count: shownCount });
+  console.log('');
+  printAddresses(`Change addresses (${COIN}/${CHANGE}, never handed out):`, change, {
+    chain: CHANGE,
+    count: shownCount,
+  });
 
   if (opts.showKey) {
-    const { address, child } = receiveAddress(receive, 0);
+    const { address, child } = addressAt(receive, 0);
     const key = encodeWIF({
       version: 0x80,
       privateKey: Buffer.from(child.privateKey),
@@ -592,6 +637,7 @@ async function main() {
     const text = fingerprintText({
       account,
       receive,
+      change,
       count: opts.count ?? CHECKED_ADDRESSES,
       passphrase,
     });
@@ -607,7 +653,8 @@ async function main() {
   // through the same comparison and the same report.
   if (opts.expect !== null || opts.expectFile !== null) {
     const source = opts.expectFile !== null ? `--expect-file ${opts.expectFile}` : '--expect';
-    reportVerdict(compareWallet({ account, receive, passphrase }, expectationsFor(opts)), source);
+    const verdict = compareWallet({ account, receive, change, passphrase }, expectationsFor(opts));
+    reportVerdict(verdict, source);
   }
 }
 
