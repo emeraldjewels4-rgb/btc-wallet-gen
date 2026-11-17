@@ -9,7 +9,7 @@
 
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -42,6 +42,25 @@ function entry(tsMs, txByte = 'ab') {
 const DIR = mkdtempSync(join(tmpdir(), 'treasury-watchdog-'));
 const WALLET_STATE = join(DIR, 'wallet-verify-state.json');
 let slack = null;
+// The audit log the drills are appended to, and the timestamp of the state the
+// fixtures last wrote: a drill entry only counts when both agree exactly.
+let LOG = null;
+let STATE_TS = null;
+const DEFAULT_CONTENTS = 'address #0: bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu\n';
+
+function drillLine(ts, contents = DEFAULT_CONTENTS) {
+  return `${JSON.stringify({
+    ts: new Date(ts).toISOString(),
+    status: 'wallet-drill',
+    record: 'record.txt',
+    recordHash: `sha256:${createHash('sha256').update(contents).digest('hex')}`,
+  })}\n`;
+}
+
+// Put the log back in step after a fixture truncates it.
+function appendDrill() {
+  if (LOG !== null && STATE_TS !== null) appendFileSync(LOG, drillLine(STATE_TS));
+}
 
 // A state as wallet.mjs now writes it: the record it verified, pinned by hash.
 function freshBackup(verifiedAt = Date.now()) {
@@ -68,6 +87,8 @@ function backupWithRecord(
       spendCheckedAt: spendCheckedAt === null ? undefined : new Date(spendCheckedAt).toISOString(),
     }),
   );
+  STATE_TS = verifiedAt;
+  appendDrill();
 }
 
 // Every run gets a backup state unless the test supplies its own, so the audit
@@ -93,11 +114,13 @@ function runWatchdog(args, env = {}) {
 try {
   slack = await startFakeSlack();
   const now = Date.now();
-  const log = join(DIR, 'refill-audit.jsonl');
+  LOG = join(DIR, 'refill-audit.jsonl');
+  const log = LOG;
   freshBackup(now);
 
   console.log('== recent activity ==');
   writeFileSync(log, `${entry(now - 60 * 60 * 1000)}\n`);
+  appendDrill();
   let run = await runWatchdog(['--audit', log, '--expected-days', '7']);
   check('a recent entry exits 0', run.code === 0, `exit ${run.code}: ${run.out.trim()}`);
   check('no alert is sent', slack.messages.length === 0, JSON.stringify(slack.messages));
@@ -105,11 +128,13 @@ try {
 
   console.log('\n== the 1.5x threshold ==');
   writeFileSync(log, `${entry(now - 10 * DAY)}\n`);
+  appendDrill();
   run = await runWatchdog(['--audit', log, '--expected-days', '7']);
   check('10 days is still inside 1.5 x 7', run.code === 0, `exit ${run.code}: ${run.out.trim()}`);
   check('and stays quiet', slack.messages.length === 0);
 
   writeFileSync(log, `${entry(now - 11 * DAY)}\n`);
+  appendDrill();
   run = await runWatchdog(['--audit', log, '--expected-days', '7']);
   check('11 days is stale', run.code === 3, `exit ${run.code}`);
   check('it says nothing was recorded', /stale: nothing recorded since/.test(run.out), run.out.trim());
@@ -143,15 +168,18 @@ try {
   check('an existing but empty log is stale too', run.code === 3, `exit ${run.code}`);
 
   console.log('\n== several logs at once ==');
+  freshBackup(now);
   const staleLog = join(DIR, 'stale.jsonl');
   const freshLog = join(DIR, 'fresh.jsonl');
   writeFileSync(staleLog, `${entry(now - 40 * DAY)}\n`);
-  writeFileSync(freshLog, `${entry(now - 2 * DAY, 'cd')}\n`);
+  // The drill can be in any of the watched logs; this one carries it.
+  writeFileSync(freshLog, `${entry(now - 2 * DAY, 'cd')}\n${drillLine(STATE_TS)}`);
   run = await runWatchdog(['--audit', staleLog, '--audit', freshLog, '--expected-days', '7']);
   check('one fresh log is enough to be healthy', run.code === 0, `exit ${run.code}: ${run.out.trim()}`);
 
   console.log('\n== damaged lines ==');
   writeFileSync(log, ['not json', JSON.stringify({ ts: 'not-a-date' }), entry(now - 60 * 60 * 1000)].join('\n') + '\n');
+  appendDrill();
   run = await runWatchdog(['--audit', log, '--expected-days', '7']);
   check('unreadable lines do not hide a fresh entry', run.code === 0, `exit ${run.code}`);
   check('it counts what it skipped', /2 unreadable line\(s\)/.test(run.out), run.out.trim());
@@ -159,6 +187,7 @@ try {
   console.log('\n== with and without a webhook ==');
   const beforeQuiet = slack.messages.length;
   writeFileSync(log, `${entry(now - 30 * DAY)}\n`);
+  appendDrill();
   run = await runWatchdog(['--audit', log, '--expected-days', '7'], { SLACK_WEBHOOK_URL: '' });
   check('a stale log without a webhook still exits 3', run.code === 3, `exit ${run.code}`);
   check('and sends nothing', slack.messages.length === beforeQuiet);
@@ -166,6 +195,7 @@ try {
 
   console.log('\n== the backup drill must not decay ==');
   writeFileSync(log, `${entry(now - 60 * 60 * 1000)}\n`);
+  appendDrill();
   freshBackup(now);
   run = await runWatchdog(['--audit', log, '--expected-days', '7']);
   check('a recently verified backup exits 0', run.code === 0, `exit ${run.code}: ${run.out.trim()}`);
@@ -230,6 +260,49 @@ try {
   writeFileSync(WALLET_STATE, JSON.stringify({ verifiedAt: new Date(now).toISOString() }));
   run = await runWatchdog(['--audit', log, '--expected-days', '7']);
   check('a state with no record at all says the same', /before the record was pinned/.test(run.out), run.out.trim());
+
+  console.log('\n== the drill claim rests on the audit log ==');
+  // The log is append-only, so a drill it never saw cannot be manufactured by
+  // editing the state file that claims it.
+  backupWithRecord(now);
+  writeFileSync(log, `${entry(now)}\n`);
+  run = await runWatchdog(['--audit', log, '--expected-days', '7']);
+  check('a state whose drill the log lacks exits 3', run.code === 3, `exit ${run.code}: ${run.out.trim()}`);
+  check(
+    'and says the log does not have it',
+    /records a drill the audit log does not have/.test(run.out),
+    run.out.trim(),
+  );
+  check('naming the log', run.out.includes(log), run.out.trim());
+  check('the alert carries it', /audit log does not have/.test(slack.messages.at(-1)?.text ?? ''), slack.messages.at(-1)?.text);
+
+  writeFileSync(log, `${entry(now)}\n`);
+  appendDrill();
+  run = await runWatchdog(['--audit', log, '--expected-days', '7']);
+  check('a state the log corroborates exits 0', run.code === 0, `exit ${run.code}: ${run.out.trim()}`);
+
+  // The match is exact: borrowing a drill from a second earlier would let any
+  // edit of the state file pass as long as a drill happened recently.
+  const rewritten = JSON.parse(readFileSync(WALLET_STATE, 'utf8'));
+  rewritten.verifiedAt = new Date(now + 1000).toISOString();
+  writeFileSync(WALLET_STATE, JSON.stringify(rewritten));
+  run = await runWatchdog(['--audit', log, '--expected-days', '7']);
+  check('a timestamp the log does not have exits 3', run.code === 3, `exit ${run.code}: ${run.out.trim()}`);
+
+  // A drill proves someone was at the keyboard, not that the refill agent ran.
+  backupWithRecord(now);
+  writeFileSync(log, '');
+  appendDrill();
+  run = await runWatchdog(['--audit', log, '--expected-days', '7']);
+  check(
+    'a drill alone is not refill activity',
+    run.code === 3 && /no refill activity/.test(run.out),
+    run.out.trim(),
+  );
+
+  backupWithRecord(now);
+  writeFileSync(log, `${entry(now)}\n`);
+  appendDrill();
 
   console.log('\n== a spend proof has its own clock ==');
   backupWithRecord(now);

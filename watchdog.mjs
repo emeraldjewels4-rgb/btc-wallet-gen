@@ -26,7 +26,7 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs';
-import { BACKUP_STATE_DEFAULT, readBackupState, recordState } from './backup-state.mjs';
+import { BACKUP_STATE_DEFAULT, DRILL_STATUS, drillEvidence, readBackupState, readDrills, recordState } from './backup-state.mjs';
 import { createSlackNotifier, resolveSlackWebhooks } from './notify.mjs';
 
 const AUDIT_DEFAULT = 'refill-audit.jsonl';
@@ -139,13 +139,17 @@ function newestActivity(audits) {
     }
     for (const line of readFileSync(path, 'utf8').split('\n')) {
       if (!line.trim()) continue;
-      let ts;
+      let parsed;
       try {
-        ts = Date.parse(JSON.parse(line).ts);
+        parsed = JSON.parse(line);
       } catch {
         unreadable += 1;
         continue;
       }
+      // A drill is evidence about the backup, not activity by the refill agent:
+      // counting it here would let a manual drill hide a stopped agent.
+      if (parsed?.status === DRILL_STATUS) continue;
+      const ts = Date.parse(parsed.ts);
       if (!Number.isFinite(ts)) {
         unreadable += 1;
         continue;
@@ -165,7 +169,7 @@ function days(ms) {
 // A backup check that is never repeated is only presumed good, and the record it
 // was checked against drifts out of memory first. Reports the age of the last
 // successful wallet --expect-file run.
-function backupState(path, limitDays, now) {
+function backupState(path, limitDays, now, audits = []) {
   const limitMs = limitDays * DAY_MS;
   const { status, verifiedAt, record, recordHash, spendCheckedAt } = readBackupState(path);
   if (status === 'missing') {
@@ -209,6 +213,19 @@ function backupState(path, limitDays, now) {
       message:
         `the backup was last verified ${new Date(verifiedAt).toISOString()} (${days(ageMs)} days ago) - ` +
         `check it at least every ${limitDays} day(s)`,
+    };
+  }
+
+  // The state file is editable by anyone; the audit log is not. A state that
+  // claims a drill the log does not contain is a claim, not evidence.
+  const { drills, missing } = readDrills(audits);
+  const evidence = drillEvidence({ verifiedAt, recordHash, drills });
+  if (evidence.status === 'absent') {
+    return {
+      ok: false,
+      message:
+        `${path} records a drill the audit log does not have - no ${DRILL_STATUS} entry for ${recordHash} in ` +
+        `${audits.join(', ')}${missing.length > 0 ? ` (missing: ${missing.join(', ')})` : ''} - run the drill again`,
     };
   }
 
@@ -268,7 +285,7 @@ async function main() {
         : `newest entry ${new Date(newest).toISOString()} (${days(age)} days ago); ` +
           `expected every ${opts.expectedDays} day(s), stale past ${days(limitMs)}`;
 
-  const backup = backupState(opts.walletState, opts.walletDays, now);
+  const backup = backupState(opts.walletState, opts.walletDays, now, opts.audits);
 
   // Both checks have the same shape: say it when it is fine, collect it when it
   // is not, and report everything collected in one place.

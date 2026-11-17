@@ -168,6 +168,15 @@ pinned anything is not a green light either: the watchdog and the weekly line
 both say it predates the pinning and ask for the drill, which is what pins the
 record.
 
+A successful drill also appends a `wallet-drill` line to the treasury's audit log
+(`--audit`, default `refill-audit.jsonl`), carrying the record hash and the same
+timestamp the state file got. The state file is editable by anyone who can reach
+it; the log is append-only, so the two readers require the pair to match exactly:
+rewrite a timestamp, or claim a drill the log never saw, and the watchdog exits
+`3` and the weekly line says the audit log has no entry for it. A drill counts as
+evidence about the backup, not as refill activity, so it cannot keep the
+dead-man's switch quiet.
+
 Deriving an address is not the same as being able to move from it, and the
 difference stays invisible until the day the backup is needed. `--spend-check`
 signs a p2wpkh spend of address `#0` with the restored key, verifies that
@@ -211,6 +220,7 @@ half-read. Older records without those lines still verify normally.
 | `--expect VALUE` | compare a restore against an xpub or address recorded earlier; needs `--restore`, exits 3 on a mismatch |
 | `--fingerprint PATH` | write the account, receive-chain and change-chain xpubs plus the first five addresses (or `--count N`) to `PATH` as a public record (`-` for stdout) |
 | `--expect-file PATH` | compare a restore against that record; needs `--restore`, exits 3 on a mismatch, and records the timestamp on success |
+| `--audit PATH` | append the drill to this audit log as well as the verify state (default `refill-audit.jsonl`); needs `--expect-file` |
 | `--verify-state PATH` | where that timestamp goes (default `.wallet-verify-state.json`, git-ignored) |
 | `--passphrase-file PATH` | read the BIP-39 passphrase from the first line of `PATH`; at a terminal with no file or variable it is asked for without echo |
 | `-h`, `--help` | usage |
@@ -474,8 +484,9 @@ node --env-file=.env watchdog.mjs --expected-days 7
 
 - `run-weekly.cmd` runs it after the publish step, so a week and a half with no
   refill activity turns the task red and posts to the alert channel - a treasury
-  the refill tool has never touched (no ledger and no spend anchor beside it) has
-  no schedule to watch, so a stale verdict is logged but does not fail the task
+  with no ledger, no spend anchor and no backup-drill state has no schedule to
+  watch, so a stale verdict is logged but does not fail the task; a drill record
+  counts as started, so a lapsed drill still fails
 - exit codes: 0 recent activity, 1 usage, 2 runtime, 3 stale - the same code the
   refill tools use for a safety refusal; 4 stays the run lock
 - the alert reports the newest entry, its age and the interval, and does not

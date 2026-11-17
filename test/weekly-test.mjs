@@ -9,7 +9,7 @@
 
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -243,8 +243,13 @@ try {
   const recordPath = join(tmpdir(), 'weekly-test-record.txt');
   const digest = (text) => `sha256:${createHash('sha256').update(text).digest('hex')}`;
   const recordText = 'address #0: bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu\n';
+  // A drill writes the state and an audit entry with one timestamp; the readers
+  // only trust the pair, so the fixture writes both.
+  const drill = (ts) =>
+    `${JSON.stringify({ ts: new Date(ts).toISOString(), status: 'wallet-drill', record: recordPath, recordHash: digest(recordText) })}\n`;
   const pinned = (verifiedAt, spendCheckedAt = verifiedAt) => {
     writeFileSync(recordPath, recordText);
+    appendFileSync(AUDIT, drill(verifiedAt));
     writeFileSync(
       WALLET_STATE,
       JSON.stringify({
@@ -295,6 +300,26 @@ try {
     /no spend check recorded - run the drill with --spend-check/.test(run.out),
     run.out.trim(),
   );
+
+  // The drill history is the part a text editor cannot rewrite.
+  pinned(Date.now() - 3 * DAY);
+  run = await runWeekly(['--audit', AUDIT]);
+  check(
+    'the line names the drill history it can see',
+    /\d+ drill\(s\) in the audit log, newest \d{4}-\d{2}-\d{2}/.test(run.out),
+    run.out.trim(),
+  );
+
+  const forged = JSON.parse(readFileSync(WALLET_STATE, 'utf8'));
+  forged.verifiedAt = new Date(Date.parse(forged.verifiedAt) + 5_000).toISOString();
+  writeFileSync(WALLET_STATE, JSON.stringify(forged));
+  run = await runWeekly(['--audit', AUDIT]);
+  check(
+    'a drill the log does not have is called out',
+    /but the audit log has no entry for this drill - run it again/.test(run.out),
+    run.out.trim(),
+  );
+  check('and is not reported as a plain drill', !/drill\(s\) in the audit log/.test(run.out), run.out.trim());
 
   writeFileSync(WALLET_STATE, 'not json');
   run = await runWeekly(['--audit', AUDIT]);

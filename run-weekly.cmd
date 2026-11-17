@@ -48,19 +48,21 @@ if "!CODE!"=="0" if not "!PUBLISH!"=="0" set "CODE=!PUBLISH!"
 rem Dead-man's switch: a week and a half with nothing in the audit log turns this
 rem task red and posts to the alert channel, so a machine that slept through its
 rem runs is not silently quiet. A fresh log keeps the task green. The only
-rem exemption is a treasury the refill tool has never touched: no ledger and no
-rem spend anchor beside it (refill.mjs writes the anchor on every pass, even idle
-rem ones), so deleting the ledger on a started treasury leaves the switch armed.
-rem A stale verdict is exempt; usage and runtime errors never are.
-set "REFILL_STARTED=0"
-if exist refill-audit.jsonl set "REFILL_STARTED=1"
-if exist refill-audit.jsonl.state.json set "REFILL_STARTED=1"
+rem exemption is a treasury with no evidence it ever started: no refill ledger,
+rem no spend anchor beside it (refill.mjs writes the anchor on every pass, even
+rem idle ones), and no backup-drill state. A successful drill writes
+rem .wallet-verify-state.json, so a lapsed drill is never exempt; deleting the
+rem ledger alone leaves the switch armed. Usage and runtime errors never are.
+set "TREASURY_STARTED=0"
+if exist refill-audit.jsonl set "TREASURY_STARTED=1"
+if exist refill-audit.jsonl.state.json set "TREASURY_STARTED=1"
+if exist .wallet-verify-state.json set "TREASURY_STARTED=1"
 echo [!STAMP!] checking for missed runs>>treasury-weekly.log
 "%NODE%" --env-file=.env watchdog.mjs --expected-days 7 >>treasury-weekly.log 2>&1
 set "WATCH=!ERRORLEVEL!"
 echo [!STAMP!] watchdog exit code !WATCH!>>treasury-weekly.log
 set "EXEMPT=0"
-if "!REFILL_STARTED!"=="0" if "!WATCH!"=="3" set "EXEMPT=1"
-if "!EXEMPT!"=="1" echo [!STAMP!] no refill ledger or spend anchor yet, so the stale verdict is informational>>treasury-weekly.log
+if "!TREASURY_STARTED!"=="0" if "!WATCH!"=="3" set "EXEMPT=1"
+if "!EXEMPT!"=="1" echo [!STAMP!] no refill ledger, spend anchor or backup drill yet, so the stale verdict is informational>>treasury-weekly.log
 if "!CODE!"=="0" if not "!WATCH!"=="0" if "!EXEMPT!"=="0" set "CODE=!WATCH!"
 exit /b !CODE!

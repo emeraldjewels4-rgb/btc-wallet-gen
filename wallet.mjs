@@ -28,7 +28,8 @@
  */
 
 import { closeSync, fstatSync, openSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { BACKUP_STATE_DEFAULT, readBackupState, recordDigest } from './backup-state.mjs';
+import { BACKUP_STATE_DEFAULT, DRILL_STATUS, readBackupState, recordDigest } from './backup-state.mjs';
+import { appendAuditLine } from './run-lock.mjs';
 import { readPermissionVerdict } from './file-permissions.mjs';
 import { createInterface } from 'node:readline/promises';
 import { dirname, resolve } from 'node:path';
@@ -92,6 +93,8 @@ function usage() {
                 else, so 'node wallet.mjs --phrase-only --out seed.txt' is a
                 backup that --restore accepts; generation only, never with --show-key,
                 and it refuses to run when stdout is a terminal
+  --audit PATH  append the drill to this audit log as well as the verify state
+                (default refill-audit.jsonl); needs --expect-file
   --expect VALUE check the restored wallet against an xpub, tpub or address
                 recorded when it was created (either chain); a mismatch exits 3, so a wrong
                 phrase or passphrase fails instead of looking like a restore
@@ -121,6 +124,7 @@ function parseArgs(argv) {
     showKey: false,
     allowTty: false,
     spendCheck: false,
+    audit: null,
     phraseFile: null,
     allowLoosePermissions: false,
     passphraseFile: null,
@@ -146,6 +150,11 @@ function parseArgs(argv) {
       opts.allowTty = true;
     } else if (arg === '--spend-check') {
       opts.spendCheck = true;
+    } else if (arg === '--audit') {
+      const value = argv[i + 1];
+      if (value === undefined || value === '') fail('--audit needs a path');
+      opts.audit = value;
+      i += 1;
     } else if (arg === '--allow-loose-permissions') {
       opts.allowLoosePermissions = true;
     } else if (arg === '--phrase-file') {
@@ -229,6 +238,9 @@ function parseArgs(argv) {
   }
   if (opts.phraseOnly && (opts.restore || opts.xpub !== null || opts.showKey || opts.fingerprint !== null)) {
     fail('--phrase-only writes a new seed phrase and nothing else, so it cannot be combined with --restore, --xpub, --show-key or --fingerprint');
+  }
+  if (opts.audit !== null && opts.expectFile === null) {
+    fail('--audit records the drill, so it needs --expect-file');
   }
   if (opts.spendCheck && !opts.restore) {
     fail('--spend-check proves a restored backup can spend, so it needs --restore');
@@ -651,7 +663,7 @@ function writeSecret(path, text) {
 // A backup check that is never repeated is only presumed good. Record when it
 // last succeeded; a failed one leaves the old timestamp alone rather than
 // pretending the drill happened.
-function recordVerification(path, record, recordText, { spendChecked }) {
+function recordVerification(path, auditPath, record, recordText, { spendChecked }) {
   // The hash covers the bytes that were checked, taken from memory rather than
   // read again: a record swapped between the two reads would otherwise be pinned
   // without having been verified. Absolute, so a later run from another
@@ -674,6 +686,23 @@ function recordVerification(path, record, recordText, { spendChecked }) {
   try {
     writeFileSync(path, `${JSON.stringify(state, null, 2)}\n`);
     console.log(`Recorded in ${path}; watchdog.mjs reports it once it goes stale or the record changes.`);
+    // The same fact, in the one place a text editor cannot rewrite: a state file
+    // claiming a drill the log never saw is refused by both readers.
+    try {
+      appendAuditLine(auditPath, {
+        ts: now,
+        status: DRILL_STATUS,
+        record: state.record,
+        recordHash,
+        spendChecked: spendChecked === true,
+      });
+      console.log(`  The drill is also in ${auditPath}, where it cannot be edited out.`);
+    } catch (err) {
+      console.error(
+        `warning: the drill succeeded but ${auditPath} could not be appended: ${err.message}\n` +
+          '  the state file now claims a drill the audit log does not have, and the readers will say so',
+      );
+    }
     if (!spendChecked) {
       console.log(
         state.spendCheckedAt === null
@@ -968,7 +997,9 @@ async function main() {
     // A failed spend check is a refusal about this backup, so it must not leave a
     // timestamp behind that looks like a pass.
     if (verdict.ok && opts.expectFile !== null && !spendCheckFailed) {
-      recordVerification(opts.verifyState, opts.expectFile, recordText, { spendChecked: opts.spendCheck === true });
+      recordVerification(opts.verifyState, opts.audit ?? 'refill-audit.jsonl', opts.expectFile, recordText, {
+        spendChecked: opts.spendCheck === true,
+      });
     }
   }
 }

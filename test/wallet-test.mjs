@@ -59,9 +59,13 @@ function check(label, condition, detail = '') {
 // A successful --expect-file writes a timestamp, which must not land in the
 // repository's own state file: every run is pointed at a scratch one instead.
 const TEST_STATE = join(tmpdir(), `wallet-test-verify-state-${process.pid}.json`);
+// A drill now appends to the treasury audit log as well, which must not be the
+// repository's own: each run is pointed at a scratch log beside the state.
+const TEST_AUDIT = join(tmpdir(), `wallet-test-audit-${process.pid}.jsonl`);
 
 function runWallet(args, input = '', env = {}) {
-  const full = args.includes('--verify-state') ? args : ['--verify-state', TEST_STATE, ...args];
+  let full = args.includes('--verify-state') ? args : ['--verify-state', TEST_STATE, ...args];
+  if (full.includes('--expect-file') && !full.includes('--audit')) full = ['--audit', TEST_AUDIT, ...full];
   return new Promise((resolve) => {
     const child = spawn(process.execPath, ['wallet.mjs', ...full], {
       cwd: ROOT,
@@ -1018,6 +1022,46 @@ check('a drill against a different record exits 0', run.code === 0, `exit ${run.
 proofState = JSON.parse(readFileSync(spendState, 'utf8'));
 check('and the old proof does not follow it', proofState.spendCheckedAt === null, JSON.stringify(proofState));
 check('saying the spend clock is now empty', /no earlier proof applies/.test(run.out), run.out);
+// The drill also lands in the audit log with the same timestamp as the state, so
+// a state rewritten later cannot claim a drill the log never saw.
+const auditOf = (path) => readFileSync(path, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+const bothState = join(verifyDir, 'both.json');
+const drillLog = join(verifyDir, 'audit.jsonl');
+run = await runWallet(
+  ['--restore', '--expect-file', localRecord, '--spend-check', '--verify-state', bothState, '--audit', drillLog],
+  VECTOR,
+);
+check('a drill with --audit exits 0', run.code === 0, `exit ${run.code}: ${run.out}`);
+check('and says where the drill is recorded', run.out.includes(drillLog), run.out);
+const drillState = JSON.parse(readFileSync(bothState, 'utf8'));
+const drillEntry = auditOf(drillLog).at(-1);
+check(
+  'the entry is a drill carrying the same timestamp as the state',
+  drillEntry.status === 'wallet-drill' && drillEntry.ts === drillState.verifiedAt,
+  JSON.stringify(drillEntry),
+);
+check('with the same record hash', drillEntry.recordHash === drillState.recordHash, JSON.stringify(drillEntry));
+check('and whether spending was proved', drillEntry.spendChecked === true, JSON.stringify(drillEntry));
+check('and no phrase in it', !/abandon/.test(readFileSync(drillLog, 'utf8')), readFileSync(drillLog, 'utf8'));
+
+const plainLog = join(verifyDir, 'plain-audit.jsonl');
+run = await runWallet(['--restore', '--expect-file', localRecord, '--verify-state', join(verifyDir, 'plain.json'), '--audit', plainLog], VECTOR);
+check('an address-only drill exits 0', run.code === 0, `exit ${run.code}: ${run.out}`);
+check('and records spendChecked false', auditOf(plainLog).at(-1).spendChecked === false, readFileSync(plainLog, 'utf8'));
+
+const failLog = join(verifyDir, 'fail-audit.jsonl');
+const otherWallet = join(verifyDir, 'other-wallet.txt');
+await runWallet(['--restore', '--fingerprint', otherWallet, '--count', '2'], 'legal winner thank year wave sausage worth useful legal winner thank yellow');
+run = await runWallet(
+  ['--restore', '--expect-file', otherWallet, '--audit', failLog, '--verify-state', join(verifyDir, 'fail.json')],
+  VECTOR,
+);
+check('a failed drill exits 3', run.code === 3, `exit ${run.code}: ${run.out}`);
+check('and appends nothing to the audit log', !existsSync(failLog), failLog);
+
+run = await runWallet(['--restore', '--audit', failLog], VECTOR);
+check('--audit without --expect-file exits 1', run.code === 1, `exit ${run.code}`);
+check('and says what it needs', /needs --expect-file/.test(run.out), run.out.trim());
 rmSync(verifyDir, { recursive: true, force: true });
 
 console.log('\n== --expect misuse ==');

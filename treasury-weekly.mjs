@@ -16,7 +16,7 @@
  * week, so a retry for the same week is a no-op unless --force is passed.
  */
 
-import { BACKUP_STATE_DEFAULT, readBackupState, recordState } from './backup-state.mjs';
+import { BACKUP_STATE_DEFAULT, drillEvidence, readBackupState, readDrills, recordState } from './backup-state.mjs';
 import { createSlackNotifier, resolveWebhook } from './notify.mjs';
 import {
   DAY_MS,
@@ -118,7 +118,7 @@ function isoWeekOf(ms) {
 // Reported every week, not only once it has lapsed: an age that is seen climbing
 // is a reminder, while an age first seen at the alert is a surprise. The 180-day
 // verdict belongs to watchdog.mjs; this line only says how long it has been.
-function backupText(path, now = Date.now()) {
+function backupText(path, now = Date.now(), auditPath = null) {
   const { status, verifiedAt, record, recordHash, spendCheckedAt } = readBackupState(path);
   if (status === 'missing') {
     return '- no backup verification recorded yet - run node wallet.mjs --restore --expect-file <record> < seed.txt';
@@ -142,7 +142,16 @@ function backupText(path, now = Date.now()) {
       ? 'no spend check recorded - run the drill with --spend-check'
       : `spend proof ${new Date(spendCheckedAt).toISOString().slice(0, 10)} ` +
         `(${((now - spendCheckedAt) / DAY_MS).toFixed(1)} days ago)`;
-  return `- ${when}; ${spend}`;
+
+  // The audit log is the drill history a text editor cannot rewrite, so the line
+  // shows whether the state's claim is in it rather than trusting the date alone.
+  const drills = auditPath === null ? { drills: [], unreadable: 0, missing: [] } : readDrills([auditPath]);
+  const evidence = drillEvidence({ verifiedAt, recordHash, drills: drills.drills });
+  const history =
+    evidence.status === 'confirmed'
+      ? `${drills.drills.length} drill(s) in the audit log, newest ${new Date(evidence.newest).toISOString().slice(0, 10)}`
+      : 'but the audit log has no entry for this drill - run it again';
+  return `- ${when}; ${spend}; ${history}`;
 }
 
 function weekLabel({ year, week }) {
@@ -248,7 +257,7 @@ async function main() {
     ...(trendLines.length > 0 ? trendLines : ['- no refills in either week']),
     '',
     '*Backup check*',
-    backupText(opts.walletState),
+    backupText(opts.walletState, Date.now(), opts.audit),
   ].join('\n');
 
   console.log(message);
