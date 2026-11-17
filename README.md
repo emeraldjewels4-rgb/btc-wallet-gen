@@ -42,10 +42,13 @@ terminal, because printing the phrase there is what the flag exists to prevent.
 
 `--out` creates the file rather than truncating one, so an existing backup is
 never silently replaced (exit `1`), and asks for mode `0600`. On POSIX that is
-what you get; on Windows the mode is ignored and the file inherits the folder's
-permissions - the tool says so when it writes, and means the file belongs on an
-encrypted volume there. Nothing of the secret reaches stdout, so `--out` is also
-how you do this at a terminal, where `--phrase-only` otherwise refuses.
+what you get; on Windows, where the mode is ignored, the tool sets an owner-only
+ACL with `icacls` instead - your account, plus SYSTEM and Administrators, who can
+take ownership regardless - and reads it back, reporting the principals that
+actually ended up on the file. If that cannot be set it says so, and means the
+file belongs on an encrypted volume there. Nothing of the secret reaches stdout,
+so `--out` is also how you do this at a terminal, where `--phrase-only` otherwise
+refuses.
 
 ## Restore an existing seed phrase
 
@@ -67,9 +70,11 @@ someone else can write to is only as private as the directory - anyone who can
 write there can delete it and put their own in its place, with whatever mode they
 like. Both refusals name the mode and how to fix it or how to insist; a sticky
 directory such as `/tmp` is fine, because there others cannot unlink a file they
-do not own. On Windows there are no modes to read, so it says the permissions
-could not be checked rather than passing them silently - keep the file on an
-encrypted volume there.
+do not own. On Windows the same question is answered from the file's ACL instead
+of its mode: any principal other than your account, SYSTEM or Administrators
+refuses the file, with the same `--allow-loose-permissions` escape. It only says
+the permissions could not be checked when the ACL itself cannot be read, rather
+than passing an unexamined file.
 
 ```sh
 chmod 600 seed.txt
@@ -214,8 +219,8 @@ half-read. Older records without those lines still verify normally.
 | `--allow-tty` | print that private key to a terminal anyway |
 | `--spend-check` | prove a restored backup can spend, not only derive: sign a spend of address #0 offline and verify the signature against the address's own script; needs `--restore`, exits 3 if the key does not control the address |
 | `--phrase-only` | print only the new seed phrase on stdout, so a redirect is a restorable backup; generation only, never with `--show-key`, and refuses to run when stdout is a terminal unless `--out` is given |
-| `--out PATH` | write what `--show-key` or `--phrase-only` would print to `PATH`: created rather than truncated, mode `0600` |
-| `--phrase-file PATH` | read the seed phrase to restore from `PATH` instead of stdin; refused if group or others can read it, or can write the directory holding it |
+| `--out PATH` | write what `--show-key` or `--phrase-only` would print to `PATH`: created rather than truncated, mode `0600` on POSIX and an owner-only ACL on Windows |
+| `--phrase-file PATH` | read the seed phrase to restore from `PATH` instead of stdin; refused if group or others can read it, can write the directory holding it, or on Windows are named in its ACL |
 | `--allow-loose-permissions` | read such a `--phrase-file` anyway |
 | `--expect VALUE` | compare a restore against an xpub or address recorded earlier; needs `--restore`, exits 3 on a mismatch |
 | `--fingerprint PATH` | write the account, receive-chain and change-chain xpubs plus the first five addresses (or `--count N`) to `PATH` as a public record (`-` for stdout) |

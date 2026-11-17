@@ -31,6 +31,7 @@ import { closeSync, fstatSync, openSync, readFileSync, statSync, writeFileSync }
 import { BACKUP_STATE_DEFAULT, DRILL_STATUS, readBackupState, recordDigest } from './backup-state.mjs';
 import { appendAuditLine } from './run-lock.mjs';
 import { readPermissionVerdict } from './file-permissions.mjs';
+import { aclVerdict, applyOwnerOnly, currentUser, readAcl } from './windows-acl.mjs';
 import { createInterface } from 'node:readline/promises';
 import { dirname, resolve } from 'node:path';
 import { spendProof } from './spend-check.mjs';
@@ -370,14 +371,25 @@ function readPhraseFile(path, allowLoose) {
     }
   }
 
-  const verdict = readPermissionVerdict({
-    path,
-    mode: info.mode,
-    dirPath,
-    dirMode,
-    platform: process.platform,
-    allowLoose,
-  });
+  // Windows has no modes; its equivalent question is who the file's DACL names,
+  // and icacls answers it. Only when that cannot be read does the platform get
+  // to say it cannot tell.
+  let verdict;
+  if (process.platform === 'win32') {
+    const acl = readAcl(path);
+    if (acl.ok) {
+      verdict = aclVerdict({ path, user: currentUser(), entries: acl.entries, allowLoose });
+    } else {
+      verdict = {
+        ok: true,
+        note:
+          `note: the ACLs of ${path} could not be read (${acl.error}), so who can read or replace it is ` +
+          'unknown - keep it on an encrypted volume, under an account with a password\n',
+      };
+    }
+  } else {
+    verdict = readPermissionVerdict({ path, mode: info.mode, dirPath, dirMode, allowLoose });
+  }
   if (verdict.note) process.stderr.write(verdict.note);
   if (!verdict.ok) {
     closeSync(fd);
@@ -650,8 +662,20 @@ function writeSecret(path, text) {
     }
     fail(`cannot write ${path}: ${err.message}`);
   }
-  // Ask the filesystem rather than trust the request: Windows ignores the mode,
-  // and saying "owner-only" there would be a promise the file does not keep.
+  // Windows ignores the mode, so its answer is the DACL: set it, then read it
+  // back and report what is actually there rather than what was asked for.
+  if (process.platform === 'win32') {
+    const acl = applyOwnerOnly(path);
+    console.log(
+      acl.ok
+        ? `Wrote ${path} (owner-only ACLs: ${acl.entries.map((entry) => entry.principal).join(', ')}).`
+        : `Wrote ${path}, but the owner-only ACLs could not be set (${acl.error}): keep it on an encrypted volume.`,
+    );
+    return;
+  }
+
+  // On POSIX, ask the filesystem rather than trust the request: a mode the
+  // platform quietly ignored would be a promise the file does not keep.
   const mode = statSync(path).mode & 0o777;
   console.log(
     (mode & 0o077) === 0

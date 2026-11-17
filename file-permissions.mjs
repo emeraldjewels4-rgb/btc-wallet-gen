@@ -8,23 +8,15 @@
  * Two questions, because one is not enough: who can read the file, and who can
  * replace it. A 0600 file in a writable directory is only as private as the
  * directory, since anyone who can write there can swap it for one they own.
+ *
+ * POSIX only: Windows has ACLs rather than modes, and windows-acl.mjs answers
+ * there instead of this module saying it cannot tell.
  */
 
 // Returns { ok, note } when the file may be read, or { ok: false, reason } when
 // it may not. `note` is advice the caller prints and carries on past.
 // `mode` and `dirMode` are st_mode values; on POSIX the caller always has both.
-export function readPermissionVerdict({ path, mode, dirPath, dirMode, platform, allowLoose }) {
-  if (platform === 'win32') {
-    // Saying "owner-only" here would be a promise this platform does not make,
-    // the same honesty writeSecret owes on the way out.
-    return {
-      ok: true,
-      note:
-        `note: Windows does not report file modes, so who can read or replace ${path} could not be checked -\n` +
-        '  keep it on an encrypted volume, under an account with a password\n',
-    };
-  }
-
+export function readPermissionVerdict({ path, mode, dirPath, dirMode, allowLoose }) {
   const bits = mode & 0o777;
   if ((bits & 0o077) !== 0 && !allowLoose) {
     return {

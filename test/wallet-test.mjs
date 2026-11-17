@@ -13,6 +13,8 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { aclVerdict, currentUser, parseIcacls, readAcl } from '../windows-acl.mjs';
 import { readPermissionVerdict } from '../file-permissions.mjs';
 import { tmpdir } from 'node:os';
 import { spendProof } from '../spend-check.mjs';
@@ -249,8 +251,8 @@ check('it says where it wrote', run.stdout.includes(phrasePath), run.stdout);
 const mode = statSync(phrasePath).mode & 0o777;
 if (process.platform === 'win32') {
   check(
-    'on Windows it says the folder permissions apply',
-    /kept the folder's permissions/.test(run.stdout),
+    'on Windows it reports the owner-only ACLs it set',
+    /owner-only ACLs: .*NT AUTHORITY\\SYSTEM/.test(run.stdout),
     run.stdout,
   );
 } else {
@@ -352,19 +354,38 @@ check(
 check('an ordinary 0755 directory is fine', verdictFor(0o600, 0o755).ok === true);
 check('and the flag carries the directory case too', verdictFor(0o600, 0o777, true).ok === true);
 
-verdict = readPermissionVerdict({
-  path: 'seed.txt',
-  mode: fileMode(0o666),
-  dirPath: '/keys',
-  dirMode: dirMode(0o700),
-  platform: 'win32',
-  allowLoose: false,
-});
+// Windows has no modes, so its answer comes from the DACL. SYSTEM and
+// Administrators can take ownership anyway; any other account is a stranger.
+const icaclsSample = [
+  'C:/keys/seed.txt NT AUTHORITY\\SYSTEM:(F)',
+  '                                             BUILTIN\\Administrators:(F)',
+  '                                             LAPTOP\\suzig:(F)',
+  '',
+  'Successfully processed 1 files; Failed processing 0 files',
+].join('\r\n');
+const aclEntries = parseIcacls(icaclsSample, 'C:/keys/seed.txt');
 check(
-  'Windows cannot tell, and says so about reading or replacing',
-  verdict.ok === true && /could not be checked/.test(verdict.note ?? '') && /read or replace/.test(verdict.note ?? ''),
-  JSON.stringify(verdict),
+  'icacls output parses to its principals',
+  aclEntries.map((entry) => entry.principal).join('|') === 'NT AUTHORITY\\SYSTEM|BUILTIN\\Administrators|LAPTOP\\suzig',
+  JSON.stringify(aclEntries),
 );
+check(
+  'the owner, SYSTEM and Administrators are acceptable',
+  aclVerdict({ path: 's', user: 'suzig', entries: aclEntries, allowLoose: false }).ok === true,
+);
+const withUsers = [...aclEntries, { principal: 'BUILTIN\\Users', rights: '(R)' }];
+let aclCheck = aclVerdict({ path: 's', user: 'suzig', entries: withUsers, allowLoose: false });
+check('any other principal is refused', aclCheck.ok === false, JSON.stringify(aclCheck));
+check(
+  'and the refusal names it with the command that fixes it',
+  /BUILTIN\\Users/.test(aclCheck.reason) && /icacls .*\/inheritance:r/.test(aclCheck.reason),
+  aclCheck.reason,
+);
+check(
+  'Everyone is a stranger too',
+  aclVerdict({ path: 's', user: 'suzig', entries: [{ principal: 'Everyone', rights: '(R)' }], allowLoose: false }).ok === false,
+);
+check('and the flag accepts one', aclVerdict({ path: 's', user: 'suzig', entries: withUsers, allowLoose: true }).ok === true);
 
 const phraseDir = mkdtempSync(join(tmpdir(), 'wallet-phrase-file-'));
 const phraseFile = join(phraseDir, 'seed.txt');
@@ -373,7 +394,48 @@ run = await runWallet(['--restore', '--count', '1', '--phrase-file', phraseFile]
 check('--phrase-file restores without stdin', run.code === 0 && run.out.includes(EXPECTED_0), `exit ${run.code}: ${run.out}`);
 check('and prints nothing of the phrase itself', !run.out.includes(VECTOR), run.out);
 if (process.platform === 'win32') {
-  check('on Windows it says the mode could not be checked', /could not be checked/.test(run.out), run.out);
+  // The platform's answer to 0600 is a DACL naming this account (plus SYSTEM and
+  // Administrators), and the check reads it rather than declining to look.
+  const ownAcl = readAcl(phraseFile);
+  check('the file ACL can be read', ownAcl.ok, JSON.stringify(ownAcl));
+  check(
+    'an ordinary file of this account passes',
+    aclVerdict({ path: phraseFile, user: currentUser(), entries: ownAcl.entries, allowLoose: false }).ok === true,
+    JSON.stringify(ownAcl),
+  );
+  check('and the run does not say it could not check', !/could not be (checked|read)/.test(run.out), run.out);
+
+  // Grant a group the phrase file does not need, the Windows way of sharing it.
+  const granted = execFileSync('icacls', [phraseFile, '/grant', 'BUILTIN\\Users:R'], { encoding: 'utf8' });
+  check('icacls grants the group', /Successfully processed/.test(granted), granted);
+  run = await runWallet(['--restore', '--count', '1', '--phrase-file', phraseFile], '');
+  check('a file another principal can read exits 1', run.code === 1, `exit ${run.code}: ${run.out}`);
+  check('and the refusal names the principal', /BUILTIN\\Users/.test(run.out), run.out.trim());
+  run = await runWallet(['--restore', '--count', '1', '--phrase-file', phraseFile, '--allow-loose-permissions'], '');
+  check('the flag reads it anyway', run.code === 0 && run.out.includes(EXPECTED_0), `exit ${run.code}: ${run.out}`);
+  // Put the file back to how it was, so the cases below test what they name.
+  execFileSync('icacls', [phraseFile, '/remove:g', 'BUILTIN\\Users'], { encoding: 'utf8' });
+  check(
+    'removing the group restores the owner-only verdict',
+    aclVerdict({ path: phraseFile, user: currentUser(), entries: readAcl(phraseFile).entries, allowLoose: false }).ok === true,
+    JSON.stringify(readAcl(phraseFile)),
+  );
+
+  // --out applies the DACL itself and reports what it actually set.
+  const keyFile = join(mkdtempSync(join(tmpdir(), 'wallet-out-acl-')), 'key.wif');
+  run = await runWallet(['--restore', '--show-key', '--out', keyFile], VECTOR);
+  check('--out on Windows exits 0', run.code === 0, `exit ${run.code}: ${run.out}`);
+  check(
+    'and reports the owner-only ACLs it set, naming the account',
+    new RegExp(`owner-only ACLs: .*${currentUser()}`).test(run.out),
+    run.out.trim(),
+  );
+  const keyAcl = readAcl(keyFile);
+  check(
+    'with no other principal left on the file',
+    keyAcl.ok && aclVerdict({ path: keyFile, user: currentUser(), entries: keyAcl.entries, allowLoose: false }).ok === true,
+    JSON.stringify(keyAcl),
+  );
 } else {
   chmodSync(phraseFile, 0o644);
   run = await runWallet(['--restore', '--count', '1', '--phrase-file', phraseFile], '');
