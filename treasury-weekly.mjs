@@ -119,7 +119,7 @@ function isoWeekOf(ms) {
 // is a reminder, while an age first seen at the alert is a surprise. The 180-day
 // verdict belongs to watchdog.mjs; this line only says how long it has been.
 function backupText(path, now = Date.now()) {
-  const { status, verifiedAt, record, recordHash } = readBackupState(path);
+  const { status, verifiedAt, record, recordHash, spendCheckedAt } = readBackupState(path);
   if (status === 'missing') {
     return '- no backup verification recorded yet - run node wallet.mjs --restore --expect-file <record> < seed.txt';
   }
@@ -133,7 +133,16 @@ function backupText(path, now = Date.now()) {
     // whether that record still matches, so the line asks for the drill.
     return `- ${when}, but that verification predates the record being pinned - run the drill again`;
   }
-  return state === 'changed' ? `- ${when}, but the record has changed since - run the drill again` : `- ${when}`;
+  if (state === 'changed') return `- ${when}, but the record has changed since - run the drill again`;
+
+  // A separate clock from the address match: matching proves the derivation, and
+  // only a run with --spend-check proves the key can move coins.
+  const spend =
+    spendCheckedAt === null
+      ? 'no spend check recorded - run the drill with --spend-check'
+      : `spend proof ${new Date(spendCheckedAt).toISOString().slice(0, 10)} ` +
+        `(${((now - spendCheckedAt) / DAY_MS).toFixed(1)} days ago)`;
+  return `- ${when}; ${spend}`;
 }
 
 function weekLabel({ year, week }) {

@@ -981,6 +981,43 @@ run = await runWallet(['--restore', '--expect-file', localRecord, '--verify-stat
 check('checking the edited record again still exits 0', run.code === 0, `exit ${run.code}: ${run.out}`);
 const repinned = JSON.parse(readFileSync(statePath, 'utf8')).recordHash;
 check('and pins its new contents', repinned !== beforeRepin && repinned === recordDigestOf(localRecord), repinned);
+
+// The spend proof keeps its own clock, so a drill that only compares addresses
+// cannot read as a backup proved able to spend.
+const spendState = join(verifyDir, 'spend-state.json');
+run = await runWallet(['--restore', '--expect-file', localRecord, '--spend-check', '--verify-state', spendState], VECTOR);
+check('a drill with --spend-check exits 0', run.code === 0, `exit ${run.code}: ${run.out}`);
+let proofState = JSON.parse(readFileSync(spendState, 'utf8'));
+check(
+  'and dates the proof',
+  Number.isFinite(Date.parse(proofState.spendCheckedAt)) && Math.abs(Date.now() - Date.parse(proofState.spendCheckedAt)) < 60_000,
+  JSON.stringify(proofState),
+);
+
+// Age the proof, then drill without the flag: the address clock moves, the
+// spend clock does not.
+const OLD_PROOF = '2026-01-01T00:00:00.000Z';
+writeFileSync(spendState, JSON.stringify({ ...proofState, spendCheckedAt: OLD_PROOF }));
+run = await runWallet(['--restore', '--expect-file', localRecord, '--verify-state', spendState], VECTOR);
+check('an address-only drill exits 0', run.code === 0, `exit ${run.code}: ${run.out}`);
+proofState = JSON.parse(readFileSync(spendState, 'utf8'));
+check('and does not refresh the spend clock', proofState.spendCheckedAt === OLD_PROOF, JSON.stringify(proofState));
+check(
+  'while the address clock does move',
+  Date.parse(proofState.verifiedAt) > Date.parse(OLD_PROOF),
+  JSON.stringify(proofState),
+);
+check('and it says the proof was left alone', /did not prove spending; the last proof is still/.test(run.out), run.out);
+
+// A proof belongs to the record it was made against: re-pinning a different one
+// makes it a fact about another file.
+const otherRecord = join(verifyDir, 'other-record.txt');
+writeFileSync(otherRecord, `${readFileSync(localRecord, 'utf8')}# a different record file\n`);
+run = await runWallet(['--restore', '--expect-file', otherRecord, '--verify-state', spendState], VECTOR);
+check('a drill against a different record exits 0', run.code === 0, `exit ${run.code}: ${run.out}`);
+proofState = JSON.parse(readFileSync(spendState, 'utf8'));
+check('and the old proof does not follow it', proofState.spendCheckedAt === null, JSON.stringify(proofState));
+check('saying the spend clock is now empty', /no earlier proof applies/.test(run.out), run.out);
 rmSync(verifyDir, { recursive: true, force: true });
 
 console.log('\n== --expect misuse ==');

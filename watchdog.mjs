@@ -167,7 +167,7 @@ function days(ms) {
 // successful wallet --expect-file run.
 function backupState(path, limitDays, now) {
   const limitMs = limitDays * DAY_MS;
-  const { status, verifiedAt, record, recordHash } = readBackupState(path);
+  const { status, verifiedAt, record, recordHash, spendCheckedAt } = readBackupState(path);
   if (status === 'missing') {
     return {
       ok: false,
@@ -211,9 +211,32 @@ function backupState(path, limitDays, now) {
         `check it at least every ${limitDays} day(s)`,
     };
   }
+
+  // Matching addresses proves the derivation, not that the key can move coins.
+  // Those are separate clocks, and this one only moves when the drill ran with
+  // --spend-check.
+  if (spendCheckedAt === null) {
+    return {
+      ok: false,
+      message:
+        `no spend check is recorded in ${path} - run the drill with --spend-check, ` +
+        'node wallet.mjs --restore --expect-file <record> --spend-check < seed.txt',
+    };
+  }
+  const spendAgeMs = now - spendCheckedAt;
+  if (spendAgeMs > limitMs) {
+    return {
+      ok: false,
+      message:
+        `the backup was last proved spendable ${new Date(spendCheckedAt).toISOString()} ` +
+        `(${days(spendAgeMs)} days ago) - run the drill with --spend-check at least every ${limitDays} day(s)`,
+    };
+  }
   return {
     ok: true,
-    message: `backup verified ${days(ageMs)} days ago (${new Date(verifiedAt).toISOString()}); stale past ${days(limitMs)}`,
+    message:
+      `backup verified ${days(ageMs)} days ago (${new Date(verifiedAt).toISOString()}); ` +
+      `spend proof ${days(spendAgeMs)} days ago; stale past ${days(limitMs)}`,
   };
 }
 

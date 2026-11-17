@@ -28,7 +28,7 @@
  */
 
 import { closeSync, fstatSync, openSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { BACKUP_STATE_DEFAULT, recordDigest } from './backup-state.mjs';
+import { BACKUP_STATE_DEFAULT, readBackupState, recordDigest } from './backup-state.mjs';
 import { readPermissionVerdict } from './file-permissions.mjs';
 import { createInterface } from 'node:readline/promises';
 import { dirname, resolve } from 'node:path';
@@ -651,19 +651,36 @@ function writeSecret(path, text) {
 // A backup check that is never repeated is only presumed good. Record when it
 // last succeeded; a failed one leaves the old timestamp alone rather than
 // pretending the drill happened.
-function recordVerification(path, record, recordText) {
+function recordVerification(path, record, recordText, { spendChecked }) {
   // The hash covers the bytes that were checked, taken from memory rather than
   // read again: a record swapped between the two reads would otherwise be pinned
   // without having been verified. Absolute, so a later run from another
   // directory still compares against the same file.
+  const now = new Date().toISOString();
+  const recordHash = recordDigest(recordText);
+  // The spend proof keeps its own clock. A drill that only compared addresses
+  // inherits the last proof rather than refreshing it, and a proof is dropped
+  // when the record is re-pinned to something else: it was made against the old
+  // record, so it says nothing about this one.
+  const previous = readBackupState(path);
+  const sameRecord = previous.status === 'ok' && previous.recordHash === recordHash;
+  const inherited = sameRecord && previous.spendCheckedAt !== null;
   const state = {
-    verifiedAt: new Date().toISOString(),
+    verifiedAt: now,
     record: resolve(record),
-    recordHash: recordDigest(recordText),
+    recordHash,
+    spendCheckedAt: spendChecked ? now : inherited ? new Date(previous.spendCheckedAt).toISOString() : null,
   };
   try {
     writeFileSync(path, `${JSON.stringify(state, null, 2)}\n`);
     console.log(`Recorded in ${path}; watchdog.mjs reports it once it goes stale or the record changes.`);
+    if (!spendChecked) {
+      console.log(
+        state.spendCheckedAt === null
+          ? '  This run did not prove spending, and no earlier proof applies: the spend-check clock is empty.'
+          : `  This run did not prove spending; the last proof is still ${state.spendCheckedAt}.`,
+      );
+    }
   } catch (err) {
     console.error(`warning: the check passed but ${path} could not be written: ${err.message}`);
   }
@@ -902,6 +919,7 @@ async function main() {
 
   // Deriving the same address is not the same as being able to move from it, and
   // the difference only shows up on the day the backup is needed.
+  let spendCheckFailed = false;
   if (opts.spendCheck) {
     const { address, child } = addressAt(receive, 0);
     const proof = spendProof({ child, address, network: NETWORK });
@@ -913,6 +931,7 @@ async function main() {
       console.error(`error: the restored key cannot spend address #0 ${address} - ${proof.reason}`);
       console.error('  do not fund this wallet: a backup that cannot sign for its own address cannot rescue it');
       process.exitCode = EXIT_MISMATCH;
+      spendCheckFailed = true;
     }
   }
 
@@ -946,7 +965,11 @@ async function main() {
     const recordText = opts.expectFile !== null ? readRecord(opts.expectFile) : null;
     const verdict = compareWallet({ account, receive, change, passphrase }, expectationsFor(opts, recordText));
     reportVerdict(verdict, source);
-    if (verdict.ok && opts.expectFile !== null) recordVerification(opts.verifyState, opts.expectFile, recordText);
+    // A failed spend check is a refusal about this backup, so it must not leave a
+    // timestamp behind that looks like a pass.
+    if (verdict.ok && opts.expectFile !== null && !spendCheckFailed) {
+      recordVerification(opts.verifyState, opts.expectFile, recordText, { spendChecked: opts.spendCheck === true });
+    }
   }
 }
 

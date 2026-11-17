@@ -5,7 +5,9 @@
  * watchdog.mjs alerts when it goes stale, and treasury-weekly.mjs reports its age
  * every week so the lapse is visible before it becomes an alert. It holds no
  * secret and no addresses - when the drill was last done, against which record,
- * and the hash of that record's contents.
+ * the hash of that record's contents, and when the key was last proved able to
+ * spend from it, which is a separate clock because a drill that only compares
+ * addresses does not prove that.
  */
 
 import { createHash } from 'node:crypto';
@@ -21,19 +23,28 @@ export function recordDigest(text) {
 // different problem from something recorded that cannot be read, and they need
 // different advice.
 export function readBackupState(path) {
-  if (!existsSync(path)) return { status: 'missing', verifiedAt: null, record: null, recordHash: null };
+  if (!existsSync(path)) {
+    return { status: 'missing', verifiedAt: null, record: null, recordHash: null, spendCheckedAt: null };
+  }
 
   try {
-    const { verifiedAt, record, recordHash } = JSON.parse(readFileSync(path, 'utf8'));
+    const { verifiedAt, record, recordHash, spendCheckedAt } = JSON.parse(readFileSync(path, 'utf8'));
     const at = Date.parse(verifiedAt);
     if (Number.isFinite(at)) {
-      return { status: 'ok', verifiedAt: at, record: record ?? null, recordHash: recordHash ?? null };
+      const spent = Date.parse(spendCheckedAt);
+      return {
+        status: 'ok',
+        verifiedAt: at,
+        record: record ?? null,
+        recordHash: recordHash ?? null,
+        spendCheckedAt: Number.isFinite(spent) ? spent : null,
+      };
     }
   } catch {
     // Falls through to 'unreadable': a truncated or hand-edited file must not
     // look like a missing one.
   }
-  return { status: 'unreadable', verifiedAt: null, record: null, recordHash: null };
+  return { status: 'unreadable', verifiedAt: null, record: null, recordHash: null, spendCheckedAt: null };
 }
 
 // A verification is a claim about one record, not about whatever is at that path

@@ -243,11 +243,17 @@ try {
   const recordPath = join(tmpdir(), 'weekly-test-record.txt');
   const digest = (text) => `sha256:${createHash('sha256').update(text).digest('hex')}`;
   const recordText = 'address #0: bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu\n';
-  const pinned = (verifiedAt) => {
+  const pinned = (verifiedAt, spendCheckedAt = verifiedAt) => {
     writeFileSync(recordPath, recordText);
     writeFileSync(
       WALLET_STATE,
-      JSON.stringify({ verifiedAt: new Date(verifiedAt).toISOString(), record: recordPath, recordHash: digest(recordText) }),
+      JSON.stringify({
+        verifiedAt: new Date(verifiedAt).toISOString(),
+        record: recordPath,
+        recordHash: digest(recordText),
+        // null leaves the field out, as a state written before the spend clock did.
+        spendCheckedAt: spendCheckedAt === null ? undefined : new Date(spendCheckedAt).toISOString(),
+      }),
     );
   };
 
@@ -270,6 +276,25 @@ try {
   check('the posted message carries it too', (slack.messages.at(-1)?.text ?? '').includes('*Backup check*'), slack.messages.at(-1)?.text);
   check('and the age is in the posted text', /\(3\.0 days ago\)/.test(slack.messages.at(-1)?.text ?? ''));
   check('the post still went out', slack.messages.length === beforePost + 1);
+
+  // The spend proof is dated on its own, so an address-only drill cannot read as
+  // a backup that was proved able to spend.
+  pinned(Date.now() - 3 * DAY, Date.now() - 120 * DAY);
+  run = await runWeekly(['--audit', AUDIT]);
+  check(
+    'the line dates the spend proof separately',
+    /spend proof \d{4}-\d{2}-\d{2} \(120\.0 days ago\)/.test(run.out),
+    run.out.trim(),
+  );
+  check('next to the address age, not instead of it', /\(3\.0 days ago\); spend proof/.test(run.out), run.out.trim());
+
+  pinned(Date.now() - 3 * DAY, null);
+  run = await runWeekly(['--audit', AUDIT]);
+  check(
+    'a state with no spend proof says so and asks for the flag',
+    /no spend check recorded - run the drill with --spend-check/.test(run.out),
+    run.out.trim(),
+  );
 
   writeFileSync(WALLET_STATE, 'not json');
   run = await runWeekly(['--audit', AUDIT]);

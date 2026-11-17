@@ -51,7 +51,11 @@ function freshBackup(verifiedAt = Date.now()) {
 // A state file that names the record it verified and pins its contents, as
 // wallet.mjs writes one. The digest is computed here, not by the tool.
 const RECORD = join(DIR, 'record.txt');
-function backupWithRecord(verifiedAt = Date.now(), contents = 'address #0: bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu\n') {
+function backupWithRecord(
+  verifiedAt = Date.now(),
+  contents = 'address #0: bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu\n',
+  spendCheckedAt = verifiedAt,
+) {
   writeFileSync(RECORD, contents);
   writeFileSync(
     WALLET_STATE,
@@ -59,6 +63,9 @@ function backupWithRecord(verifiedAt = Date.now(), contents = 'address #0: bc1qc
       verifiedAt: new Date(verifiedAt).toISOString(),
       record: RECORD,
       recordHash: `sha256:${createHash('sha256').update(contents).digest('hex')}`,
+      // null means the field is absent, as in a state written by a version that
+      // never proved spending.
+      spendCheckedAt: spendCheckedAt === null ? undefined : new Date(spendCheckedAt).toISOString(),
     }),
   );
 }
@@ -223,6 +230,36 @@ try {
   writeFileSync(WALLET_STATE, JSON.stringify({ verifiedAt: new Date(now).toISOString() }));
   run = await runWatchdog(['--audit', log, '--expected-days', '7']);
   check('a state with no record at all says the same', /before the record was pinned/.test(run.out), run.out.trim());
+
+  console.log('\n== a spend proof has its own clock ==');
+  backupWithRecord(now);
+  run = await runWatchdog(['--audit', log, '--expected-days', '7']);
+  check('a drill that proved spending exits 0', run.code === 0, `exit ${run.code}: ${run.out.trim()}`);
+  check('and the message dates the proof', /spend proof 0\.0 days ago/.test(run.out), run.out.trim());
+
+  // The addresses matched minutes ago; the last time this backup was proved able
+  // to spend was months ago. That is the clock the green light was hiding.
+  backupWithRecord(now, undefined, now - 200 * DAY);
+  run = await runWatchdog(['--audit', log, '--expected-days', '7']);
+  check('a spend proof beyond the window exits 3', run.code === 3, `exit ${run.code}: ${run.out.trim()}`);
+  check(
+    'and says the backup was last proved spendable then',
+    /was last proved spendable .*\(200\.0 days ago\)/.test(run.out) && /--spend-check/.test(run.out),
+    run.out.trim(),
+  );
+  check('the alert carries it', /proved spendable/.test(slack.messages.at(-1)?.text ?? ''), slack.messages.at(-1)?.text);
+
+  run = await runWatchdog(['--audit', log, '--expected-days', '7', '--wallet-days', '365']);
+  check('--wallet-days gives the proof the same window', run.code === 0, `exit ${run.code}: ${run.out.trim()}`);
+
+  backupWithRecord(now, undefined, null);
+  run = await runWatchdog(['--audit', log, '--expected-days', '7']);
+  check('a state with no spend proof at all exits 3', run.code === 3, `exit ${run.code}: ${run.out.trim()}`);
+  check(
+    'and names the flag that would produce one',
+    /no spend check is recorded/.test(run.out) && /--spend-check/.test(run.out),
+    run.out.trim(),
+  );
 
   freshBackup(now);
   const never = join(DIR, 'never-verified.json');
