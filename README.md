@@ -236,7 +236,7 @@ so, since no wallet imports that form: re-record it.
 | `--phrase-file PATH` | read the seed phrase to restore from `PATH` instead of stdin; refused if group or others can read it, can write the directory holding it, or on Windows are named in its ACL |
 | `--allow-loose-permissions` | read such a `--phrase-file` anyway |
 | `--expect VALUE` | compare a restore against an xpub or address recorded earlier; needs `--restore`, exits 3 on a mismatch |
-| `--fingerprint PATH` | write the account, receive-chain and change-chain xpubs plus the first five addresses (or `--count N`) to `PATH` as a public record (`-` for stdout) |
+| `--fingerprint PATH` | write the account, receive-chain and change-chain xpubs, the account's descriptor, and the first five addresses (or `--count N`) to `PATH` as a public record (`-` for stdout) |
 | `--expect-file PATH` | compare a restore against that record; needs `--restore`, exits 3 on a mismatch, and records the timestamp on success |
 | `--audit PATH` | append the drill to this audit log as well as the verify state (default `refill-audit.jsonl`); needs `--expect-file` |
 | `--verify-state PATH` | where that timestamp goes (default `.wallet-verify-state.json`, git-ignored) |
