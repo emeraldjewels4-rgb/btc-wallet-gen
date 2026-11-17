@@ -30,6 +30,7 @@
 import { closeSync, fstatSync, openSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { BACKUP_STATE_DEFAULT, DRILL_STATUS, readBackupState, recordDigest } from './backup-state.mjs';
 import { appendAuditLine } from './run-lock.mjs';
+import { accountDescriptor, descriptorChecksum, descriptorChecksumOf, fingerprintHex, stripChecksum } from './descriptor.mjs';
 import { readPermissionVerdict } from './file-permissions.mjs';
 import { aclVerdict, applyOwnerOnly, currentUser, readAcl } from './windows-acl.mjs';
 import { createInterface } from 'node:readline/promises';
@@ -425,14 +426,23 @@ function looksLikeReport(text) {
 // together rather than derived from each other later.
 function walletNodes(mnemonic, passphrase) {
   const seed = mnemonicToSeedSync(mnemonic, passphrase);
-  const account = HDKey.fromMasterSeed(seed).derive(COIN);
-  return { account, receive: account.deriveChild(RECEIVE), change: account.deriveChild(CHANGE) };
+  // The master key is kept for its fingerprint alone: BIP-380 key origin names
+  // the root the account path was taken from.
+  const master = HDKey.fromMasterSeed(seed);
+  const account = master.derive(COIN);
+  return { master, account, receive: account.deriveChild(RECEIVE), change: account.deriveChild(CHANGE) };
+}
+
+// d34db33f/84h/0h/0h: the fingerprint the account key came from, then the path
+// that produced it, spelled the way descriptors spell hardened steps.
+function originFor(master) {
+  return master === null ? null : `${fingerprintHex(master)}/${COIN.replace(/^m\//, '').replace(/'/g, 'h')}`;
 }
 
 // The public record a backup is checked against years later: account xpub,
 // receive-chain xpub and the first addresses. No phrase, no key, so it can be
 // committed - though it does tie those addresses and their balances together.
-function fingerprintText({ account, receive, change, count, passphrase }) {
+function fingerprintText({ master, account, receive, change, count, passphrase }) {
   const lines = [
     '# wallet.mjs fingerprint - public data, safe to commit: no phrase, no private key.',
     '# It does reveal these addresses and their balances to whoever reads it.',
@@ -454,6 +464,9 @@ function fingerprintText({ account, receive, change, count, passphrase }) {
     `account-xpub: ${account.publicExtendedKey}`,
     `receive-chain-xpub: ${receive.publicExtendedKey}`,
     `change-chain-xpub: ${change.publicExtendedKey}`,
+    // What a wallet imports, script type included: restoring from the xpub alone
+    // leaves that to a guess, and a wrong guess looks like a wrong backup.
+    `descriptor: ${accountDescriptor({ accountXpub: account.publicExtendedKey, origin: originFor(master) })}`,
   ];
   for (let i = 0; i < count; i += 1) {
     lines.push(`address #${i}: ${addressAt(receive, i).address}`);
@@ -467,6 +480,7 @@ function parseFingerprint(text) {
     path: null,
     passphrase: null,
     accountXpub: null,
+    descriptor: null,
     receiveXpub: null,
     changeXpub: null,
     addresses: [],
@@ -483,6 +497,7 @@ function parseFingerprint(text) {
     else if (key === 'account-xpub') fields.accountXpub = value;
     else if (key === 'receive-chain-xpub') fields.receiveXpub = value;
     else if (key === 'change-chain-xpub') fields.changeXpub = value;
+    else if (key === 'descriptor') fields.descriptor = value;
     else if (/^address #\d+$/.test(key)) fields.addresses.push([Number(key.slice('address #'.length)), value]);
   }
   fields.addresses.sort((a, b) => a[0] - b[0]);
@@ -530,6 +545,9 @@ function expectationsFor(opts, recordText) {
   if (fields.accountXpub !== null) expectations.push({ kind: 'account-xpub', value: fields.accountXpub });
   if (fields.receiveXpub !== null) expectations.push({ kind: 'receive-xpub', value: fields.receiveXpub });
   if (fields.changeXpub !== null) expectations.push({ kind: 'change-xpub', value: fields.changeXpub });
+  // The script type last: when it disagrees, the xpubs usually do too, and the
+  // first mismatch that explains itself is the one worth reading.
+  if (fields.descriptor !== null) expectations.push({ kind: 'descriptor', value: fields.descriptor });
   for (const [index, value] of fields.addresses) expectations.push({ kind: 'address', index, value });
   return expectations;
 }
@@ -553,7 +571,7 @@ function testnetAdvice() {
   return `  that value is testnet and this wallet restores mainnet only (${COIN}); compare it against the mainnet xpub or a bc1 address`;
 }
 
-function resolveExpectation(expectation, { account, receive, change, passphrase }) {
+function resolveExpectation(expectation, { master = null, account, receive, change, passphrase }) {
   switch (expectation.kind) {
     case 'path':
       return {
@@ -591,6 +609,30 @@ function resolveExpectation(expectation, { account, receive, change, passphrase 
         // A receive-chain xpub has no parent here, so its sibling is unknown.
         change === null ? 'unavailable from a receive-chain xpub' : change.publicExtendedKey,
       );
+
+    case 'descriptor': {
+      // Compared with the checksum verified separately, so a hand-edited
+      // descriptor is told apart from one that merely describes another wallet.
+      const expected = accountDescriptor({ accountXpub: account.publicExtendedKey, origin: originFor(master ?? null) });
+      const given = expectation.value;
+      const givenChecksum = descriptorChecksumOf(given);
+      const checksumOk = givenChecksum === null || givenChecksum === descriptorChecksum(stripChecksum(given));
+      const xpubOf = (text) => (text.match(/[xt]pub[1-9A-HJ-NP-Za-km-z]+/) ?? [''])[0];
+      // Only explain the failure when the key itself agrees: a different wallet
+      // fails this too, and the generic blame is the honest answer there.
+      const sameKey = xpubOf(given) === xpubOf(expected);
+      return {
+        label: 'account descriptor',
+        expected: given,
+        actual: expected,
+        ok: checksumOk && stripChecksum(given) === stripChecksum(expected),
+        advice: !checksumOk
+          ? "  the record's descriptor checksum does not match its own text - the line was edited after it was written"
+          : sameKey
+            ? '  the record describes a different script type, key origin or derivation - a wallet importing it would not show these addresses'
+            : undefined,
+      };
+    }
 
     case 'xpub': {
       // A bare xpub is accepted at either depth, so both are candidates and the
@@ -928,7 +970,7 @@ async function main() {
 
   // After the phrase, so an interactive run asks for the passphrase second.
   const passphrase = await resolvePassphrase(opts);
-  const { account, receive, change } = walletNodes(mnemonic, passphrase);
+  const { master, account, receive, change } = walletNodes(mnemonic, passphrase);
 
   if (opts.restore) {
     const wordCount = mnemonic.split(' ').length;
@@ -997,6 +1039,7 @@ async function main() {
 
   if (opts.fingerprint !== null) {
     const text = fingerprintText({
+      master,
       account,
       receive,
       change,
@@ -1016,7 +1059,7 @@ async function main() {
   if (opts.expect !== null || opts.expectFile !== null) {
     const source = opts.expectFile !== null ? `--expect-file ${opts.expectFile}` : '--expect';
     const recordText = opts.expectFile !== null ? readRecord(opts.expectFile) : null;
-    const verdict = compareWallet({ account, receive, change, passphrase }, expectationsFor(opts, recordText));
+    const verdict = compareWallet({ master, account, receive, change, passphrase }, expectationsFor(opts, recordText));
     reportVerdict(verdict, source);
     // A failed spend check is a refusal about this backup, so it must not leave a
     // timestamp behind that looks like a pass.

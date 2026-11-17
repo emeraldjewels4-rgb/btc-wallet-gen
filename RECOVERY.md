@@ -32,6 +32,7 @@ The record states all of this, and it is what makes the rest work:
 | `coin` | `0` | Bitcoin mainnet. Testnet is `1`, and is a different wallet |
 | `receive-path` | `m/84'/0'/0'/0` | addresses you are paid at |
 | `change-path` | `m/84'/0'/0'/1` | change from spending, never handed out |
+| `descriptor` | `wpkh([…/84h/0h/0h]xpub…/0;1/*)#…` | the same thing as one importable line: script type, key origin, both chains |
 
 Address `i` on either chain is `<chain path>/i` - `m/84'/0'/0'/0/0` is the first
 receive address, `m/84'/0'/0'/1/0` the first change address. Script type is
@@ -53,7 +54,10 @@ Names differ per wallet; the shape does not.
 1. Choose **restore / import an existing wallet**, not "create new".
 2. Enter the seed phrase, in order, in the wallet's own word entry.
 3. Enter the passphrase if the record requires one.
-4. Choose **native SegWit (BIP-84)** as the script type, and account `0`.
+4. Choose **native SegWit (BIP-84)** as the script type, and account `0`. If the
+   wallet takes a descriptor, paste the record's `descriptor` line instead of
+   choosing anything: it states the script type, the key origin and both chains,
+   so there is nothing left to guess.
 5. Let the wallet show its first receive address.
 6. Compare it with the record:
 

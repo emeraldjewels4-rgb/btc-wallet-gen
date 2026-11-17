@@ -208,6 +208,14 @@ instead of being blamed on the phrase, a record made for a different derivation
 path says so, and a version this tool does not understand is refused rather than
 half-read. Older records without those lines still verify normally.
 
+A `descriptor` line pins the script type as well, as a BIP-380 descriptor:
+`wpkh([73c5da0a/84h/0h/0h]xpub…/0;1/*)#p2xlyjak`. Without it, a wallet importing
+the xpub alone has to guess `p2wpkh`; guess `p2sh-p2wpkh` from the same key and
+every address differs, which looks exactly like a bad backup. The line is checked
+by `--expect-file`, including its checksum, so an edited descriptor is refused
+rather than silently meaning something else. A record written before this line
+existed still verifies - re-record it to pin the script type.
+
 ## Flags
 
 | Flag | Meaning |

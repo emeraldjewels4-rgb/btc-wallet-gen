@@ -15,6 +15,14 @@ import { createHash } from 'node:crypto';
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { aclVerdict, currentUser, parseIcacls, readAcl } from '../windows-acl.mjs';
+import {
+  accountDescriptor,
+  descriptorChecksum,
+  descriptorChecksumOf,
+  fingerprintHex,
+  stripChecksum,
+  withChecksum,
+} from '../descriptor.mjs';
 import { readPermissionVerdict } from '../file-permissions.mjs';
 import { tmpdir } from 'node:os';
 import { spendProof } from '../spend-check.mjs';
@@ -754,7 +762,9 @@ run = await runWallet(['--restore', '--expect-file', legacyPath], VECTOR);
 check('a record without provenance still verifies', run.code === 0, `exit ${run.code}: ${run.out}`);
 check(
   'and says only what it checked',
-  /matches --expect-file .*\(account xpub, receive-chain xpub, change-chain xpub, addresses #0\.\.#2\)/.test(run.out),
+  /matches --expect-file .*\(account xpub, receive-chain xpub, change-chain xpub, account descriptor, addresses #0\.\.#2\)/.test(
+    run.out,
+  ),
   run.out,
 );
 
@@ -762,7 +772,7 @@ run = await runWallet(['--restore', '--expect-file', fpPath], VECTOR);
 check('a matching record verifies', run.code === 0, `exit ${run.code}: ${run.out}`);
 check(
   'and lists what it checked',
-  /matches --expect-file .*\(derivation path, BIP-39 passphrase, account xpub, receive-chain xpub, change-chain xpub, addresses #0\.\.#2\)/.test(
+  /matches --expect-file .*\(derivation path, BIP-39 passphrase, account xpub, receive-chain xpub, change-chain xpub, account descriptor, addresses #0\.\.#2\)/.test(
     run.out,
   ),
   run.out,
@@ -1001,6 +1011,41 @@ run = await runWalletPrompted(['--count', '1'], '\r');
 check('with the prompt in use there is no environment note', !/comes from the environment/.test(run.out), run.out);
 rmSync(passDir, { recursive: true, force: true });
 
+console.log('\n== the account descriptor ==');
+// The published BIP-380 vector: if the checksum drifts, every record written from
+// now on is wrong, so this is pinned rather than recomputed here.
+check('the BIP-380 checksum vector holds', descriptorChecksum('raw(deadbeef)') === '89f8spxm', descriptorChecksum('raw(deadbeef)'));
+check('one changed character breaks it', descriptorChecksum('raw(deedbeef)') !== '89f8spxm');
+check('withChecksum is the text plus its checksum', withChecksum('raw(deadbeef)') === 'raw(deadbeef)#89f8spxm');
+check('stripChecksum drops it', stripChecksum('raw(deadbeef)#89f8spxm') === 'raw(deadbeef)');
+check(
+  'a character outside the set is refused',
+  (() => {
+    try {
+      descriptorChecksum('raw(\u00dc)');
+      return false;
+    } catch {
+      return true;
+    }
+  })(),
+);
+const sampleDescriptor = accountDescriptor({ accountXpub: 'xpubSAMPLEKEY', origin: '73c5da0a/84h/0h/0h' });
+check(
+  'a descriptor names the script type, the origin and both chains',
+  /^wpkh\(\[73c5da0a\/84h\/0h\/0h\]xpubSAMPLEKEY\/0;1\/\*\)#[0-9a-z]{8}$/.test(sampleDescriptor),
+  sampleDescriptor,
+);
+check(
+  'and carries a checksum that verifies',
+  descriptorChecksum(stripChecksum(sampleDescriptor)) === descriptorChecksumOf(sampleDescriptor),
+  sampleDescriptor,
+);
+check(
+  'without an origin it is still a descriptor',
+  /^wpkh\(xpubSAMPLEKEY\/0;1\/\*\)#[0-9a-z]{8}$/.test(accountDescriptor({ accountXpub: 'xpubSAMPLEKEY', origin: null })),
+  accountDescriptor({ accountXpub: 'xpubSAMPLEKEY', origin: null }),
+);
+
 console.log('\n== the check leaves a timestamp for the watchdog ==');
 // Run in a scratch directory so the state file does not land in the repository.
 const verifyDir = mkdtempSync(join(tmpdir(), 'wallet-verify-'));
@@ -1011,6 +1056,32 @@ await runWallet(['--restore', '--fingerprint', localRecord, '--count', '2'], VEC
 run = await runWallet(['--restore', '--expect-file', localRecord, '--verify-state', statePath], VECTOR);
 check('a successful check exits 0', run.code === 0, `exit ${run.code}: ${run.out}`);
 check('and writes the state file', existsSync(statePath), verifyDir);
+
+// The record says which script its addresses use, which is what a wallet
+// importing the xpub would otherwise have to guess.
+const descriptorLineOf = (path) =>
+  readFileSync(path, 'utf8')
+    .split('\n')
+    .find((line) => line.startsWith('descriptor: '))
+    .slice('descriptor: '.length);
+const recordDescriptor = descriptorLineOf(localRecord);
+check(
+  'the record carries a BIP-380 descriptor for the account',
+  /^wpkh\(\[[0-9a-f]{8}\/84h\/0h\/0h\]xpub[1-9A-HJ-NP-Za-km-z]+\/0;1\/\*\)#[0-9a-z]{8}$/.test(recordDescriptor),
+  recordDescriptor,
+);
+check(
+  'whose checksum verifies',
+  descriptorChecksum(stripChecksum(recordDescriptor)) === descriptorChecksumOf(recordDescriptor),
+  recordDescriptor,
+);
+// The origin fingerprint is derived here from the phrase, not read from the tool.
+const masterOfVector = HDKey.fromMasterSeed(mnemonicToSeedSync(VECTOR, ''));
+check(
+  'and whose origin is this phrase’s master fingerprint',
+  recordDescriptor.includes(`[${fingerprintHex(masterOfVector)}/84h/0h/0h]`),
+  `${fingerprintHex(masterOfVector)} in ${recordDescriptor}`,
+);
 
 const state = existsSync(statePath) ? JSON.parse(readFileSync(statePath, 'utf8')) : {};
 check(
@@ -1047,6 +1118,38 @@ run = await runWallet(['--restore', '--expect-file', localRecord, '--verify-stat
 check('checking the edited record again still exits 0', run.code === 0, `exit ${run.code}: ${run.out}`);
 const repinned = JSON.parse(readFileSync(statePath, 'utf8')).recordHash;
 check('and pins its new contents', repinned !== beforeRepin && repinned === recordDigestOf(localRecord), repinned);
+
+// A restore into another wallet could still differ by guessed script type, so a
+// descriptor disagreement is a refusal even when every xpub and address matches.
+const rewriteDescriptor = (mutate) => {
+  const text = readFileSync(localRecord, 'utf8');
+  return text.replace(/^descriptor: .*$/m, (line) => `descriptor: ${mutate(line.slice('descriptor: '.length))}`);
+};
+
+const shRecord = join(verifyDir, 'sh-record.txt');
+writeFileSync(shRecord, rewriteDescriptor((descriptor) => withChecksum(`sh(${stripChecksum(descriptor)})`)));
+run = await runWallet(['--restore', '--expect-file', shRecord, '--verify-state', join(verifyDir, 'sh.json')], VECTOR);
+check('a different script type exits 3', run.code === 3, `exit ${run.code}: ${run.out}`);
+check('and the descriptor is the reason', /account descriptor/.test(run.out) && /script type/.test(run.out), run.out);
+check('while every other comparison still passed', !/account xpub.*does not match/is.test(run.out), run.out);
+
+const staleRecord = join(verifyDir, 'stale-descriptor.txt');
+writeFileSync(
+  staleRecord,
+  rewriteDescriptor((descriptor) => `${stripChecksum(descriptor).replace('0;1', '0;2')}#${descriptorChecksumOf(descriptor)}`),
+);
+run = await runWallet(['--restore', '--expect-file', staleRecord, '--verify-state', join(verifyDir, 'stale.json')], VECTOR);
+check('a descriptor edited after its checksum exits 3', run.code === 3, `exit ${run.code}: ${run.out}`);
+check('and says the checksum no longer matches', /checksum does not match/.test(run.out), run.out);
+
+const originRecord = join(verifyDir, 'origin-record.txt');
+writeFileSync(
+  originRecord,
+  rewriteDescriptor((descriptor) => withChecksum(stripChecksum(descriptor).replace(/\[[0-9a-f]{8}\//, '[deadbee5/'))),
+);
+run = await runWallet(['--restore', '--expect-file', originRecord, '--verify-state', join(verifyDir, 'origin.json')], VECTOR);
+check('a different key origin exits 3', run.code === 3, `exit ${run.code}: ${run.out}`);
+check('and points at the script type or origin', /script type, key origin or derivation/.test(run.out), run.out);
 
 // The spend proof keeps its own clock, so a drill that only compares addresses
 // cannot read as a backup proved able to spend.
