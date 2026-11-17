@@ -1032,7 +1032,7 @@ check(
 const sampleDescriptor = accountDescriptor({ accountXpub: 'xpubSAMPLEKEY', origin: '73c5da0a/84h/0h/0h' });
 check(
   'a descriptor names the script type, the origin and both chains',
-  /^wpkh\(\[73c5da0a\/84h\/0h\/0h\]xpubSAMPLEKEY\/0;1\/\*\)#[0-9a-z]{8}$/.test(sampleDescriptor),
+  /^wpkh\(\[73c5da0a\/84h\/0h\/0h\]xpubSAMPLEKEY\/<0;1>\/\*\)#[0-9a-z]{8}$/.test(sampleDescriptor),
   sampleDescriptor,
 );
 check(
@@ -1040,9 +1040,19 @@ check(
   descriptorChecksum(stripChecksum(sampleDescriptor)) === descriptorChecksumOf(sampleDescriptor),
   sampleDescriptor,
 );
+// The BIP-380 vector above contains none of <, > or ;, so a published example of
+// the bracketed form pins those charset entries too. Without the brackets no
+// descriptor parser reads a multipath step at all.
+const bracketedExample =
+  'wpkh([73c5da0a/84h/0h/0h]xpub6CatWdiZiodmUeTDp8LT5or8nmbKNcuyvz7WyksVFkKB4RHwCD3XyuvPEbvqAQY3rAPshWcMLoP2fMFMKHPJ4ZeZXYVUhLv1VMrjPC7PW6V/<0;1>/*)';
+check(
+  'a bracketed multipath descriptor checksums as written elsewhere',
+  descriptorChecksum(bracketedExample) === 'qf45pmyh',
+  descriptorChecksum(bracketedExample),
+);
 check(
   'without an origin it is still a descriptor',
-  /^wpkh\(xpubSAMPLEKEY\/0;1\/\*\)#[0-9a-z]{8}$/.test(accountDescriptor({ accountXpub: 'xpubSAMPLEKEY', origin: null })),
+  /^wpkh\(xpubSAMPLEKEY\/<0;1>\/\*\)#[0-9a-z]{8}$/.test(accountDescriptor({ accountXpub: 'xpubSAMPLEKEY', origin: null })),
   accountDescriptor({ accountXpub: 'xpubSAMPLEKEY', origin: null }),
 );
 
@@ -1067,7 +1077,7 @@ const descriptorLineOf = (path) =>
 const recordDescriptor = descriptorLineOf(localRecord);
 check(
   'the record carries a BIP-380 descriptor for the account',
-  /^wpkh\(\[[0-9a-f]{8}\/84h\/0h\/0h\]xpub[1-9A-HJ-NP-Za-km-z]+\/0;1\/\*\)#[0-9a-z]{8}$/.test(recordDescriptor),
+  /^wpkh\(\[[0-9a-f]{8}\/84h\/0h\/0h\]xpub[1-9A-HJ-NP-Za-km-z]+\/<0;1>\/\*\)#[0-9a-z]{8}$/.test(recordDescriptor),
   recordDescriptor,
 );
 check(
@@ -1136,11 +1146,22 @@ check('while every other comparison still passed', !/account xpub.*does not matc
 const staleRecord = join(verifyDir, 'stale-descriptor.txt');
 writeFileSync(
   staleRecord,
-  rewriteDescriptor((descriptor) => `${stripChecksum(descriptor).replace('0;1', '0;2')}#${descriptorChecksumOf(descriptor)}`),
+  rewriteDescriptor((descriptor) => `${stripChecksum(descriptor).replace('<0;1>', '<0;2>')}#${descriptorChecksumOf(descriptor)}`),
 );
 run = await runWallet(['--restore', '--expect-file', staleRecord, '--verify-state', join(verifyDir, 'stale.json')], VECTOR);
 check('a descriptor edited after its checksum exits 3', run.code === 3, `exit ${run.code}: ${run.out}`);
 check('and says the checksum no longer matches', /checksum does not match/.test(run.out), run.out);
+
+// A record written while the line used a bare 0;1: the same account, in a
+// spelling no descriptor parser reads, so it is refused for that reason.
+const bareRecord = join(verifyDir, 'bare-multipath.txt');
+writeFileSync(
+  bareRecord,
+  rewriteDescriptor((descriptor) => withChecksum(stripChecksum(descriptor).replace('/<0;1>/*', '/0;1/*'))),
+);
+run = await runWallet(['--restore', '--expect-file', bareRecord, '--verify-state', join(verifyDir, 'bare.json')], VECTOR);
+check('a descriptor with a bare 0;1 exits 3', run.code === 3, `exit ${run.code}: ${run.out}`);
+check('and blames the spelling, not the wallet', /brackets BIP-389/.test(run.out) && !/different script type/.test(run.out), run.out);
 
 const originRecord = join(verifyDir, 'origin-record.txt');
 writeFileSync(

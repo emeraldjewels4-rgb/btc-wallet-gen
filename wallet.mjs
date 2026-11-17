@@ -621,6 +621,15 @@ function resolveExpectation(expectation, { master = null, account, receive, chan
       // Only explain the failure when the key itself agrees: a different wallet
       // fails this too, and the generic blame is the honest answer there.
       const sameKey = xpubOf(given) === xpubOf(expected);
+      // A record written while this line used a bare 0;1 holds the same account in
+      // a spelling no descriptor parser reads, so it is refused for the spelling
+      // rather than blamed on the script type it states correctly.
+      const bareMultipath = stripChecksum(given).match(/\/(\d+);(\d+)\//);
+      const sameAccount =
+        bareMultipath !== null &&
+        sameKey &&
+        stripChecksum(given.replace(bareMultipath[0], `/<${bareMultipath[1]};${bareMultipath[2]}>/`)) ===
+          stripChecksum(expected);
       return {
         label: 'account descriptor',
         expected: given,
@@ -628,9 +637,11 @@ function resolveExpectation(expectation, { master = null, account, receive, chan
         ok: checksumOk && stripChecksum(given) === stripChecksum(expected),
         advice: !checksumOk
           ? "  the record's descriptor checksum does not match its own text - the line was edited after it was written"
-          : sameKey
-            ? '  the record describes a different script type, key origin or derivation - a wallet importing it would not show these addresses'
-            : undefined,
+          : sameAccount
+            ? "  the record's descriptor spells the two chains 0;1 without the brackets BIP-389 defines, which no wallet imports - re-record it with --fingerprint"
+            : sameKey
+              ? '  the record describes a different script type, key origin or derivation - a wallet importing it would not show these addresses'
+              : undefined,
       };
     }
 

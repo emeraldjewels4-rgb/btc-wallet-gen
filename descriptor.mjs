@@ -1,14 +1,17 @@
 /**
- * The BIP-380 output descriptor for the account this tool derives.
+ * The output descriptor for the account this tool derives: BIP-380 for the script
+ * type, BIP-389 for both chains in one key expression.
  *
  * The record already pins the xpub and the paths, which a wallet restoring from
  * that xpub still has to interpret: guessing p2sh-p2wpkh instead of p2wpkh gives
  * different addresses from identical key material, and looks exactly like a bad
- * backup. A descriptor says which script the addresses use, so importing it into
- * Sparrow, Electrum or a Coldcard cannot differ by that guess.
+ * backup. A descriptor says which script the addresses use, so a wallet that
+ * reads descriptors derives these addresses instead of guessing them.
  *
- * The checksum is the descriptor one from the BIP, so a hand-edited descriptor is
- * caught rather than quietly meaning something else.
+ * The multipath step is written <0;1>, brackets included: BIP-389 defines it that
+ * way and descriptor parsers look for exactly that form, so a bare 0;1 is a parse
+ * error rather than a line a wallet would accept. The checksum covers the text as
+ * written, so it changes whenever the line does.
  */
 
 // Both charsets are from BIP-380 / Bitcoin Core's descriptor.cpp; the checksum is
@@ -81,8 +84,8 @@ export function fingerprintHex(master) {
 }
 
 // wpkh([d34db33f/84h/0h/0h]xpub…/<0;1>/*): the script type, the key with the
-// account path that produced it, and both chains in one multipath expression.
+// account path that produced it, and both chains in one BIP-389 multipath step.
 export function accountDescriptor({ accountXpub, origin, receive = 0, change = 1 }) {
-  const body = `wpkh(${origin ? `[${origin}]` : ''}${accountXpub}/${receive};${change}/*)`;
+  const body = `wpkh(${origin ? `[${origin}]` : ''}${accountXpub}/<${receive};${change}>/*)`;
   return withChecksum(body);
 }
