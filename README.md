@@ -473,7 +473,9 @@ node --env-file=.env watchdog.mjs --expected-days 7
 ```
 
 - `run-weekly.cmd` runs it after the publish step, so a week and a half with no
-  refill activity turns the task red and posts to the alert channel
+  refill activity turns the task red and posts to the alert channel - a treasury
+  the refill tool has never touched (no ledger and no spend anchor beside it) has
+  no schedule to watch, so a stale verdict is logged but does not fail the task
 - exit codes: 0 recent activity, 1 usage, 2 runtime, 3 stale - the same code the
   refill tools use for a safety refusal; 4 stays the run lock
 - the alert reports the newest entry, its age and the interval, and does not
