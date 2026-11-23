@@ -1,0 +1,21 @@
+{
+  "name": "loveriver",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "loveriver (LOVER): fixed-supply BEP-20 token on BNB Smart Chain, with 5 admin wallets and 9,999 holder wallets.",
+  "license": "MIT",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "wallets": "node scripts/generate-wallets.mjs",
+    "verify:input": "node scripts/verify-input.mjs",
+    "deploy": "node scripts/deploy.mjs",
+    "distribute": "node scripts/distribute.mjs"
+  },
+  "dependencies": {
+    "viem": "^2.57.17"
+  },
+  "devDependencies": {
+    "solc": "0.8.28"
+  }
+}
