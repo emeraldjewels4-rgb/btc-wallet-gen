@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 // Sends each wallet its allocation from the treasury. Dry run unless --live.
-// Progress is written to wallets/distribute-state.json so an interrupted run
-// resumes where it stopped instead of sending twice.
-import { createPublicClient, createWalletClient, formatEther, http, isAddress, parseUnits } from 'viem';
+// Recipients are read from the encrypted keystores when they exist, otherwise
+// from the plaintext CSVs. Progress is written to wallets/distribute-state.json
+// so an interrupted run resumes where it stopped instead of sending twice.
+import { createPublicClient, createWalletClient, formatEther, getAddress, http, isAddress, parseUnits } from 'viem';
 import { bsc, bscTestnet } from 'viem/chains';
 import { privateKeyToAccount } from 'viem/accounts';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { flag, loadEnv } from './env.mjs';
@@ -31,20 +32,54 @@ if (limitFlag !== undefined && (!Number.isInteger(limit) || limit < 1)) {
 
 const token = JSON.parse(readFileSync(join(root, 'token.json'), 'utf8'));
 const artifact = JSON.parse(readFileSync(join(root, 'build', 'LoverRiver.json'), 'utf8'));
-const walletDir = join(root, 'wallets');
+const walletDir = resolve(root, flag('wallets', 'wallets'));
 const statePath = join(walletDir, 'distribute-state.json');
+const checksum = (value) => getAddress(`0x${String(value).replace(/^0x/, '')}`);
 
-function readCsv(name) {
-  const file = join(walletDir, name);
-  if (!existsSync(file)) {
-    console.error(`missing ${file}; run: npm run wallets`);
+// Keystores win when present; the CSVs fallback keeps a fresh key set working.
+// If both are there they have to list the same wallets, or a resume could pay
+// one set against the other's state.
+function readGroup(group) {
+  const csvPath = join(walletDir, `${group}.csv`);
+  const keystoreDir = join(walletDir, 'keystores', group);
+  const names = existsSync(keystoreDir)
+    ? readdirSync(keystoreDir).filter((name) => name.endsWith('.json')).sort()
+    : [];
+  const fromCsv = existsSync(csvPath)
+    ? readFileSync(csvPath, 'utf8')
+        .trim()
+        .split('\n')
+        .slice(1)
+        .map((line) => checksum(line.split(',')[1]))
+    : undefined;
+
+  if (names.length > 0) {
+    const fromKeystores = names.map((name) => {
+      const file = join(keystoreDir, name);
+      const keystore = JSON.parse(readFileSync(file, 'utf8'));
+      if (typeof keystore.address !== 'string') {
+        console.error(`${file} has no address; is it a keystore?`);
+        process.exit(1);
+      }
+      return checksum(keystore.address);
+    });
+    if (fromCsv) {
+      const known = new Set(fromCsv);
+      if (fromKeystores.length !== fromCsv.length || fromKeystores.some((address) => !known.has(address))) {
+        console.error(
+          `${group}: ${names.length} keystores and ${csvPath.slice(root.length + 1)} disagree; refusing to use either`,
+        );
+        process.exit(1);
+      }
+    }
+    return { addresses: fromKeystores, source: 'keystores' };
+  }
+
+  if (!fromCsv) {
+    console.error(`no ${group}.csv or keystores/${group}; run: npm run wallets`);
     process.exit(1);
   }
-  return readFileSync(file, 'utf8')
-    .trim()
-    .split('\n')
-    .slice(1)
-    .map((line) => line.split(',')[1]);
+  return { addresses: fromCsv, source: 'csv' };
 }
 
 const tokenFlag = flag('token');
@@ -59,10 +94,16 @@ if (tokenAddress && !isAddress(tokenAddress)) {
 
 const { adminAmount, holderAmount } = token.allocation;
 const unit = (amount) => parseUnits(String(amount), token.decimals);
+const admins = readGroup('admins');
+const holders = readGroup('holders');
 const recipients = [
-  ...readCsv('admins.csv').map((address) => ({ address, amount: unit(adminAmount), group: 'admin' })),
-  ...readCsv('holders.csv').map((address) => ({ address, amount: unit(holderAmount), group: 'holder' })),
+  ...admins.addresses.map((address) => ({ address, amount: unit(adminAmount), group: 'admin' })),
+  ...holders.addresses.map((address) => ({ address, amount: unit(holderAmount), group: 'holder' })),
 ];
+if (new Set(recipients.map((recipient) => recipient.address)).size !== recipients.length) {
+  console.error('the recipient list repeats an address; refusing to continue');
+  process.exit(1);
+}
 
 const supply = BigInt(token.totalSupply) * 10n ** BigInt(token.decimals);
 const planned = recipients.reduce((sum, recipient) => sum + recipient.amount, 0n);
@@ -79,6 +120,7 @@ const batch = pending.slice(0, limit);
 
 console.log(`token     ${token.name} (${token.symbol}) at ${tokenAddress ?? '(not deployed yet)'}`);
 console.log(`chain     ${chain.name} (${chain.id})`);
+console.log(`wallets   ${walletDir.slice(root.length + 1)} (${admins.source === holders.source ? admins.source : `${admins.source} admins, ${holders.source} holders`})`);
 console.log(`recipients ${recipients.length} (${recipients.length - pending.length} already sent, ${pending.length} pending)`);
 console.log(`total     ${planned} base units (${token.totalSupply} tokens)`);
 

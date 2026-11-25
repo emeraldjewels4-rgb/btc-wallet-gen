@@ -16,14 +16,33 @@ npm run build
 
 `build/` is git-ignored, so **rebuild after every clone or dependency restore** — deploy and verification both read the artifact from there.
 
-Back up the keys before touching a network:
+Encrypt the 10,004 keys at rest, before backing anything up:
 
 ```bash
-cp wallets/admins.csv wallets/holders.csv /media/encrypted-offline-backup/
-chmod 400 /media/encrypted-offline-backup/*.csv
+npm run keystore -- encrypt
 ```
 
-**Check:** `wc -l wallets/*.csv` → 6 and 10,000 (header + rows). These two files are the only copy of the private keys; without them the wallets are unreachable.
+Type the passphrase twice (12+ characters, no echo). It writes one Web3 Secret Storage V3 keystore per address to `wallets/keystores/`, reads them back, and proves the passphrase opens the first and last wallet of each group. About 40 minutes at the default scrypt cost; `--n 131072` is stronger and slower, `--n 32768` faster.
+
+```bash
+cp -r wallets/keystores /media/encrypted-offline-backup/
+cp wallets/holders.json wallets/summary.json /media/encrypted-offline-backup/
+chmod -R go-rwx /media/encrypted-offline-backup/keystores
+```
+
+**Check:** `find wallets/keystores -name '*.json' | wc -l` → 10,004 (5 admins, 9,999 holders). Keep the passphrase somewhere separate from that backup: without it the keystores are unreadable, with it the backup is the wallet set.
+
+Once the backup opens, drop the plaintext CSVs — this only deletes them if every wallet has a keystore:
+
+```bash
+npm run keystore -- remove-plaintext
+```
+
+Distribution reads whichever form it finds and refuses to run if the keystore and CSV lists disagree. To spend a single wallet by hand:
+
+```bash
+npm run keystore -- decrypt --address 0x...   # writes wallets/0x....key, mode 0600
+```
 
 ## 1. Deploy to testnet (Chapel, chain 97)
 
