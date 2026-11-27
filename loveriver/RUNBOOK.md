@@ -22,11 +22,9 @@ h=$(git rev-parse --git-path hooks) && cp scripts/pre-push "$h/pre-push" && chmo
 
 **Check:** `"$(git rev-parse --git-path hooks)/pre-push"` prints `clean: …` and exits 0. From then on every `git push` runs `npm run scan:secrets` first — it scans everything the push would publish for wallet CSVs, private keys and keystore JSON, and refuses the push (exit 1, naming the file) if any turns up.
 
-CI runs the same scan on every push and pull request, but a red check only blocks a merge once it is required: under Settings → Branches → branch protection, require status check `secrets` **and** "Require a pull request before merging" — required checks are only evaluated on pull requests, so without the second, pushes to the branch skip them.
+CI runs the same scan on every push and pull request, but a red check only blocks a merge once it is required: under Settings → Branches → branch protection, require status checks `secrets` and `test` **and** "Require a pull request before merging" — required checks are only evaluated on pull requests, so without the second, pushes to the branch skip them. Hold `secrets` back until this branch has merged, because the job exists only here: a PR from a branch cut off `master` — the umask fix on `freebuff/wallet-test-umask`, say — can report `test` and nothing else, and would wait forever on a check it can never produce.
 
-The `secrets` job exists only on this branch, so a PR from a branch cut off `master` — the umask fix on `freebuff/wallet-test-umask`, say — can report `test` and nothing else. A protection rule that requires `secrets` would leave such a PR waiting on a check it can never produce; require `secrets` once this branch has merged, and until then keep the requirement to `test` or expect to override it deliberately for the smaller PR.
-
-As things stand `master` reports `protected: false` from the branches API, so nothing is actually required on it and a push lands unchallenged — the rule described here is a plan, not a state. Check rather than assume: `GET /repos/{owner}/{repo}/branches` returns a `protected` flag per branch and needs no token on a public repo, while the protection endpoint itself needs admin credentials to read or change.
+None of that is in force yet: `master` reports `protected: false`, so nothing is required on it and a push lands unchallenged — the rule is a plan, not a state. Check rather than assume, with `GET /repos/{owner}/{repo}/branches`, which returns a `protected` flag per branch and needs no token on a public repo, unlike the protection endpoint itself, which needs admin credentials to read or change.
 
 `build/` is git-ignored, so **rebuild after every clone or dependency restore** — deploy and verification both read the artifact from there.
 
