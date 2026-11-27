@@ -1,0 +1,13 @@
+#!/bin/sh
+# Runs before every push and blocks it if the secret scan finds wallet material.
+# Git hooks live in .git/hooks, which is never pushed, so this is opt-in per
+# clone - install it with the one line in RUNBOOK.md step 0.
+#
+# The scan needs the repository as a whole, not the directory the push was run
+# from, so it resolves the toplevel first.
+root=$(git rev-parse --show-toplevel) || exit 1
+cd "$root/loveriver" || exit 1
+npm run --silent scan:secrets || {
+  echo 'pre-push: blocked - this push would publish wallet material (see above).' >&2
+  exit 1
+}

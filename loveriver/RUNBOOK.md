@@ -14,6 +14,14 @@ npm run build
 
 **Check:** prints `compiled LoverRiver with solc 0.8.28…` and `runtime bytecode 1.4 KiB`.
 
+Install the pre-push secret check once per clone. Hooks live outside the working tree (in the hooks directory git reports below), so this is opt-in and must be repeated after a fresh clone:
+
+```bash
+h=$(git rev-parse --git-path hooks) && cp scripts/pre-push "$h/pre-push" && chmod +x "$h/pre-push"
+```
+
+**Check:** `"$(git rev-parse --git-path hooks)/pre-push"` prints `clean: …` and exits 0. From then on every `git push` runs `npm run scan:secrets` first — it scans everything the push would publish for wallet CSVs, private keys and keystore JSON, and refuses the push (exit 1, naming the file) if any turns up.
+
 `build/` is git-ignored, so **rebuild after every clone or dependency restore** — deploy and verification both read the artifact from there.
 
 Encrypt the 10,004 keys at rest, before backing anything up:
@@ -40,6 +48,8 @@ chmod -R go-rwx /media/encrypted-offline-backup/keystores
 ```
 
 **Check:** `find wallets/keystores -name '*.json' | wc -l` → 10,004 (5 admins, 9,999 holders). Keep the passphrase somewhere separate from that backup: without it the keystores are unreadable, with it the backup is the wallet set.
+
+Before every push, run `npm run scan:secrets` — a clean result prints `clean: no wallet CSV, private key or keystore JSON in anything a push would publish.` and exits 0.
 
 Before deleting the fallback, prove every keystore is the wallet its filename claims — `encrypt` only spot-checks the first and last of each group:
 
