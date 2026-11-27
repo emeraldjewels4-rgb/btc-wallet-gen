@@ -26,6 +26,8 @@ CI runs the same scan on every push and pull request, but a red check only block
 
 None of that is in force yet: `master` reports `protected: false`, so nothing is required on it and a push lands unchallenged — the rule is a plan, not a state. Check rather than assume, with `GET /repos/{owner}/{repo}/branches`, which returns a `protected` flag per branch and needs no token on a public repo, unlike the protection endpoint itself, which needs admin credentials to read or change.
 
+Merge `freebuff/wallet-test-umask` first — two commits, and it makes `master`'s `test` job green on its own — and only add `secrets` to the required checks once this branch has merged, because until then that job exists nowhere on `master`.
+
 `build/` is git-ignored, so **rebuild after every clone or dependency restore** — deploy and verification both read the artifact from there.
 
 Encrypt the 10,004 keys at rest, before backing anything up:
