@@ -133,9 +133,21 @@ curl -s "https://api.etherscan.io/v2/api?chainid=97&module=contract&action=check
 
 ## 3. Rehearse distribution on testnet
 
-### 3a. Small set first — the whole path in seconds
+### 3a. One command, no testnet, no funding
 
-The real set is 10,004 transfers, too slow to repeat while you are still learning the script. Make a throwaway set of 2 admins + 8 holders in its own folder, with the real per-wallet amounts:
+```bash
+npm run rehearse
+```
+
+That starts a throwaway chain in-process, deploys the real contract to it, sends the 10-wallet rehearsal set, reruns the distribution to prove it resumes without paying twice, and audits the result from the chain — about five seconds, no tBNB, no key, nothing left behind.
+
+**Check:** ends `rehearsal passed: deploy, ten transfers, a resume that sent nothing, and an audit that matched.` with exit 0, and the audit block above it reads `paid 10/10`, `unreadable 0`, `confirmed:`.
+
+It works in `wallets/rehearse-tmp/` with a chain-local treasury, restores an existing `deployments/97.json` (or removes the one it wrote), and deletes the temp wallets at the end. `npm run rehearse -- --keep` leaves both in place when something fails and you want to look. Run it after any change to the scripts and before a real distribution.
+
+### 3b. The same path by hand, on real testnet
+
+The run above proves the scripts; this one proves your `.env`, RPC, funded treasury and the explorer side. The real set is 10,004 transfers, too slow to repeat while you are still learning the script, so make a throwaway set of 2 admins + 8 holders in its own folder, with the real per-wallet amounts:
 
 ```bash
 npm run wallets -- --rehearsal
@@ -159,7 +171,7 @@ npm run distribute -- --chain bsc-testnet --wallets wallets/rehearsal --rehearsa
 
 `--rehearsal` is refused with `--chain bsc`, so it can never be used on mainnet. The rehearsal set keeps its own state file in `wallets/rehearsal/`, so it does not touch the real run's progress. Delete `wallets/rehearsal/` once the real distribution is underway.
 
-### 3b. The real set, at real scale
+### 3c. The real set, at real scale
 
 Admins are paid first, then holders in file order. Do the admin batch on its own so every later chunk is a clean 500 × 6,999,999:
 
