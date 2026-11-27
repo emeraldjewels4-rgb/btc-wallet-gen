@@ -4,12 +4,19 @@
 // audit. The point is that it can be run before any real run without a faucet, a
 // funded key or a hand-typed command sequence.
 //
+// The audit runs twice: once with a multicall3 contract at the canonical
+// address, which is the path BSC itself takes, and once without it, which is the
+// fallback a private node or a dev chain gets. A bare ganache only has the
+// second, and covering just that would rehearse the branch the real run never
+// uses.
+//
 // It touches nothing permanent: the treasury is a chain-local account, the
 // wallets live in wallets/rehearse-tmp/, and an existing deployments/97.json is
 // put back afterwards. --keep leaves the wallet dir and the deployment record
 // alone so a failure can be inspected.
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import solc from 'solc';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, rmdirSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
@@ -29,11 +36,54 @@ console.warn = warn;
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const keep = process.argv.includes('--keep');
+const MULTICALL3 = '0xcA11bde05977b3631167028862bE2a173976CA11';
 const walletArg = 'wallets/rehearse-tmp';
 const walletDir = join(root, walletArg);
 const deploymentsDir = join(root, 'deployments');
 const deploymentFile = join(deploymentsDir, '97.json');
 const shown = (path) => path.slice(root.length + 1);
+
+// Just enough of multicall3 for viem's multicall: aggregate3 with per-call
+// allowFailure. Real BSC has the full deployment at this address; the audit only
+// asks for aggregate3, so a faithful stub is what puts the rehearsal on the path
+// a real run takes (one RPC call for the whole batch).
+const MULTICALL3_SOURCE = `// SPDX-License-Identifier: MIT
+pragma solidity 0.8.28;
+
+contract Multicall3 {
+    struct Call3 { address target; bool allowFailure; bytes callData; }
+    struct Result { bool success; bytes returnData; }
+
+    function aggregate3(Call3[] calldata calls) external payable returns (Result[] memory results) {
+        results = new Result[](calls.length);
+        for (uint256 i = 0; i < calls.length; i++) {
+            (bool ok, bytes memory data) = calls[i].target.call(calls[i].callData);
+            if (!ok && !calls[i].allowFailure) revert();
+            results[i] = Result(ok, data);
+        }
+    }
+}
+`;
+
+function multicall3Runtime() {
+  const input = {
+    language: 'Solidity',
+    sources: { 'Multicall3.sol': { content: MULTICALL3_SOURCE } },
+    settings: {
+      // Same target as the token: the chain here runs shanghai, and a cancun
+      // build would use PUSH0 and fail every call.
+      evmVersion: 'paris',
+      optimizer: { enabled: true, runs: 200 },
+      outputSelection: { '*': { '*': ['evm.deployedBytecode.object'] } },
+    },
+  };
+  const output = JSON.parse(solc.compile(JSON.stringify(input)));
+  const errors = (output.errors ?? []).filter((error) => error.severity === 'error');
+  if (errors.length > 0) {
+    throw new Error(`multicall3 stub does not compile: ${errors[0].formattedMessage.trim()}`);
+  }
+  return `0x${output.contracts['Multicall3.sol'].Multicall3.evm.deployedBytecode.object}`;
+}
 
 function freePort() {
   return new Promise((done, fail) => {
@@ -124,6 +174,14 @@ try {
   console.log(`wallets    ${walletArg} (throwaway)`);
   console.log(`restores   ${shown(deploymentFile)} afterwards, so a real deployment record is untouched`);
 
+  // BSC has multicall3; a bare local chain does not. Install it first so the
+  // audit takes the same route it will take on the real run.
+  const runtime = multicall3Runtime();
+  await server.provider.request({ method: 'evm_setAccountCode', params: [MULTICALL3, runtime] });
+  const installed = await server.provider.request({ method: 'eth_getCode', params: [MULTICALL3, 'latest'] });
+  if (!installed || installed === '0x') throw new Error('could not install the multicall3 stub');
+  console.log(`multicall3 ${MULTICALL3} (stub, ${(runtime.length / 2 - 1)} bytes)`);
+
   await step('generate the rehearsal wallet set', [
     'scripts/generate-wallets.mjs',
     '--rehearsal',
@@ -149,7 +207,23 @@ try {
     '--rehearsal',
     '--live',
   ], env);
-  await step('audit', ['scripts/audit.mjs', '--chain', 'bsc-testnet', '--wallets', walletArg], env);
+  await step('audit, with multicall3 (the path BSC takes)', [
+    'scripts/audit.mjs',
+    '--chain',
+    'bsc-testnet',
+    '--wallets',
+    walletArg,
+  ], env);
+
+  // Then take it away and prove the fallback still confirms the same result.
+  await server.provider.request({ method: 'evm_setAccountCode', params: [MULTICALL3, '0x'] });
+  await step('audit again, without multicall3 (the fallback)', [
+    'scripts/audit.mjs',
+    '--chain',
+    'bsc-testnet',
+    '--wallets',
+    walletArg,
+  ], env);
 } catch (error) {
   failed = true;
   console.error(`\nrehearsal failed: ${error.message}`);
@@ -158,4 +232,6 @@ try {
 }
 
 if (failed) process.exit(1);
-console.log('\nrehearsal passed: deploy, ten transfers, a resume that sent nothing, and an audit that matched.');
+console.log(
+  '\nrehearsal passed: deploy, ten transfers, a resume that sent nothing, and two audits that matched - one through multicall3 and one through individual balanceOf calls.',
+);

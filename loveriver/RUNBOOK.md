@@ -141,7 +141,12 @@ npm run rehearse
 
 That starts a throwaway chain in-process, deploys the real contract to it, sends the 10-wallet rehearsal set, reruns the distribution to prove it resumes without paying twice, and audits the result from the chain — about five seconds, no tBNB, no key, nothing left behind.
 
-**Check:** ends `rehearsal passed: deploy, ten transfers, a resume that sent nothing, and an audit that matched.` with exit 0, and the audit block above it reads `paid 10/10`, `unreadable 0`, `confirmed:`.
+The audit runs **twice**, because there are two ways it reads balances. With a multicall3 contract at the canonical address it batches, which is what BSC does; with none it reads one `balanceOf` at a time, which is what a private node or a dev chain gets. A bare local chain only has the second, so the rehearsal installs a multicall3 stub at `0xcA11bde05977b3631167028862bE2a173976CA11` for the first pass and removes it for the second. Both must confirm the same balances.
+
+**Check:** ends `rehearsal passed: deploy, ten transfers, a resume that sent nothing, and two audits that matched - one through multicall3 and one through individual balanceOf calls.` with exit 0, and above it:
+
+- `=== audit, with multicall3 (the path BSC takes)` → `mode multicall3 at 0xca11…`, `read 10 balances in 1 RPC call(s)`, `paid 10/10`, `confirmed:`
+- `=== audit again, without multicall3 (the fallback)` → `mode individual balanceOf calls (no multicall3 at 0xca11…)`, `read 10 balances in 10 RPC call(s)`, `paid 10/10`, `confirmed:`
 
 It works in `wallets/rehearse-tmp/` with a chain-local treasury, restores an existing `deployments/97.json` (or removes the one it wrote), and deletes the temp wallets at the end. `npm run rehearse -- --keep` leaves both in place when something fails and you want to look. Run it after any change to the scripts and before a real distribution.
 
