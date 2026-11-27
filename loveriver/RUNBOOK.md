@@ -24,6 +24,8 @@ h=$(git rev-parse --git-path hooks) && cp scripts/pre-push "$h/pre-push" && chmo
 
 CI runs the same scan on every push and pull request, but a red check only blocks a merge once it is required: under Settings → Branches → branch protection, require status check `secrets` **and** "Require a pull request before merging" — required checks are only evaluated on pull requests, so without the second, pushes to the branch skip them.
 
+The `secrets` job exists only on this branch, so a PR from a branch cut off `master` — the umask fix on `freebuff/wallet-test-umask`, say — can report `test` and nothing else. A protection rule that requires `secrets` would leave such a PR waiting on a check it can never produce; require `secrets` once this branch has merged, and until then keep the requirement to `test` or expect to override it deliberately for the smaller PR.
+
 `build/` is git-ignored, so **rebuild after every clone or dependency restore** — deploy and verification both read the artifact from there.
 
 Encrypt the 10,004 keys at rest, before backing anything up:
