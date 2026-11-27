@@ -235,6 +235,8 @@ npm run audit -- --chain bsc
 
 **Check:** `paid 10004/10004`, `unpaid`, `short`, `overpaid` and `unreadable` all 0, treasury 0 base units, and a last line starting `confirmed:` with exit 0. Any wallet that does not match is printed by address and the command exits 1; `--batch 500` is the multicall size, `--token` and `--treasury` override the deployment record.
 
+The `mode` line says how it reads balances: `multicall3 at 0xcA11…` normally, or `individual balanceOf calls` on a node without multicall3 (a local dev chain, a private node) — same result, 10,004 calls instead of 21, so it takes minutes rather than seconds. A multicall that fails mid-run drops to individual calls for the rest of that run and says so.
+
 - `totalSupply` = 69,999,999,991
 - Holders tab = 10,004 addresses
 - Treasury token balance = 0 (only BNB gas dust left)
