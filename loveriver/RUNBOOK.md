@@ -22,7 +22,7 @@ h=$(git rev-parse --git-path hooks) && cp scripts/pre-push "$h/pre-push" && chmo
 
 **Check:** `"$(git rev-parse --git-path hooks)/pre-push"` prints `clean: …` and exits 0. From then on every `git push` runs `npm run scan:secrets` first — it scans everything the push would publish for wallet CSVs, private keys and keystore JSON, and refuses the push (exit 1, naming the file) if any turns up.
 
-CI runs the same scan on every push and pull request, but a red check only blocks a merge once it is required: add `secrets` under Settings → Branches → branch protection → Require status checks to pass.
+CI runs the same scan on every push and pull request, but a red check only blocks a merge once it is required: under Settings → Branches → branch protection, require status check `secrets` **and** "Require a pull request before merging" — required checks are only evaluated on pull requests, so without the second, pushes to the branch skip them.
 
 `build/` is git-ignored, so **rebuild after every clone or dependency restore** — deploy and verification both read the artifact from there.
 
