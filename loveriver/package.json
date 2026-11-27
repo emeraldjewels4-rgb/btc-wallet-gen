@@ -13,7 +13,8 @@
     "deploy": "node scripts/deploy.mjs",
     "distribute": "node scripts/distribute.mjs",
     "audit": "node scripts/audit.mjs",
-    "rehearse": "node scripts/rehearse.mjs"
+    "rehearse": "node scripts/rehearse.mjs",
+    "scan:secrets": "node scripts/scan-secrets.mjs"
   },
   "dependencies": {
     "viem": "^2.57.17"
