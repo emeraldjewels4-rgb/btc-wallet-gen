@@ -26,6 +26,8 @@ CI runs the same scan on every push and pull request, but a red check only block
 
 The `secrets` job exists only on this branch, so a PR from a branch cut off `master` — the umask fix on `freebuff/wallet-test-umask`, say — can report `test` and nothing else. A protection rule that requires `secrets` would leave such a PR waiting on a check it can never produce; require `secrets` once this branch has merged, and until then keep the requirement to `test` or expect to override it deliberately for the smaller PR.
 
+As things stand `master` reports `protected: false` from the branches API, so nothing is actually required on it and a push lands unchallenged — the rule described here is a plan, not a state. Check rather than assume: `GET /repos/{owner}/{repo}/branches` returns a `protected` flag per branch and needs no token on a public repo, while the protection endpoint itself needs admin credentials to read or change.
+
 `build/` is git-ignored, so **rebuild after every clone or dependency restore** — deploy and verification both read the artifact from there.
 
 Encrypt the 10,004 keys at rest, before backing anything up:
