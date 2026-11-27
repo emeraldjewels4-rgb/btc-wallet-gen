@@ -34,3 +34,7 @@ node_modules/
 /seedphrase.txt
 /mnemonic.txt
 *.seed.txt
+
+# PR descriptions drafted locally for `gh pr create --body-file`; never part of a commit.
+/pr-body.md
+/pr-body-umask.md
