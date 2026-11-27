@@ -49,7 +49,7 @@ chmod -R go-rwx /media/encrypted-offline-backup/keystores
 
 **Check:** `find wallets/keystores -name '*.json' | wc -l` → 10,004 (5 admins, 9,999 holders). Keep the passphrase somewhere separate from that backup: without it the keystores are unreadable, with it the backup is the wallet set.
 
-Before every push, run `npm run scan:secrets` — a clean result prints `clean: no wallet CSV, private key or keystore JSON in anything a push would publish.` and exits 0.
+Before every push, run `npm run scan:secrets` — a clean result prints `clean: no wallet CSV, private key, keystore JSON, committed .env or seed phrase in anything a push would publish.` and exits 0.
 
 Before deleting the fallback, prove every keystore is the wallet its filename claims — `encrypt` only spot-checks the first and last of each group:
 

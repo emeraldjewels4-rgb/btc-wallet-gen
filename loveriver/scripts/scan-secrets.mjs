@@ -82,7 +82,29 @@ for (const [, path] of paths) {
   if (/^(admins|holders)\.csv$/i.test(name)) report(path, 'wallet CSV name');
   if (/\.keystore\.json$/i.test(name)) report(path, 'keystore file name');
   if (/\.key$/i.test(name) && !/\.key\.example$/i.test(name)) report(path, 'key file name');
+  // A committed .env is the treasury key in plain sight; the checked-in
+  // templates that end in .example/.sample/.template/.dist are not.
+  if (/^\.env(\.|$)/i.test(name) && !/\.(example|sample|template|dist)$/i.test(name)) {
+    report(path, 'environment file name');
+  }
 }
+
+// The BIP-39 spec's own test vectors, published in the standard and used by the
+// tests in this repo. They are placeholders in the same way an all-zero key is:
+// skipping them keeps the rule from firing on a fixture rather than a secret.
+const PUBLIC_TEST_PHRASES = new Set([
+  'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about',
+  'legal winner thank year wave sausage worth useful legal winner thank yellow',
+]);
+
+// Function words that are deliberately absent from the BIP-39 English list.
+const NOT_IN_BIP39 = new Set(
+  // Checked against the official 2048-word English list: none of these is a
+  // BIP-39 word, so filtering them cannot hide a real phrase.
+  'the and with from not them than their which while each after should would could was were been are do does did your our we us my me he she his her who whom why how an of on in to as at by or so if for'.split(
+    ' ',
+  ),
+);
 
 // Content rules run on blob text: a renamed copy still carries the key, and a
 // keystore's fields identify it whatever it is called.
@@ -96,6 +118,21 @@ const contentRules = [
   ],
   [/"ciphertext"\s*:\s*"/g, () => 'ciphertext field', () => 'keystore JSON'],
   [/"crypto"\s*:\s*\{[^}]*"cipherparams"/g, () => 'crypto/cipherparams block', () => 'keystore JSON'],
+  [
+    // 12 or 24 consecutive lowercase words is the shape of a BIP-39 phrase. The
+    // words are masked: enough to find the line, not enough to be the phrase.
+    /\b(?:[a-z]{3,8}[ \t]+){11,23}[a-z]{3,8}\b/g,
+    (match) => {
+      const words = match.trim().split(/\s+/);
+      // Prose also runs twelve words together. No BIP-39 word is a common
+      // English function word, so one of these means it is a sentence, and the
+      // whole word list can stay out of this file.
+      if (words.some((word) => NOT_IN_BIP39.has(word))) return undefined;
+      if (PUBLIC_TEST_PHRASES.has(words.join(' '))) return undefined;
+      return `${words[0]} ${words[1]}…${words[words.length - 1]} (${words.length} words)`;
+    },
+    (shown) => `seed-phrase-shaped text ${shown}`,
+  ],
 ];
 
 function scans(text) {
@@ -139,7 +176,9 @@ console.log(`history    ${commits} commit(s) reachable from HEAD, all of them pu
 console.log(`scanned    ${blobs.length} file blob(s), ${megabytes} MiB`);
 
 if (findings.length === 0) {
-  console.log('\nclean: no wallet CSV, private key or keystore JSON in anything a push would publish.');
+  console.log(
+    '\nclean: no wallet CSV, private key, keystore JSON, committed .env or seed phrase in anything a push would publish.',
+  );
   process.exit(0);
 }
 

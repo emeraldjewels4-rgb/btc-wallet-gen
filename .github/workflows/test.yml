@@ -12,6 +12,27 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+        with:
+          # The scan reads every commit a push would publish, so a shallow
+          # checkout would only ever see one of them and pass.
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+
+      # The scan uses only node builtins, so there is nothing to install first.
+      - name: Scan for wallet material
+        working-directory: loveriver
+        run: npm run --silent scan:secrets
+
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
