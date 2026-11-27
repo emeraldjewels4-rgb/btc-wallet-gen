@@ -22,20 +22,7 @@ h=$(git rev-parse --git-path hooks) && cp scripts/pre-push "$h/pre-push" && chmo
 
 **Check:** `"$(git rev-parse --git-path hooks)/pre-push"` prints `clean: …` and exits 0. From then on every `git push` runs `npm run scan:secrets` first — it scans everything the push would publish for wallet CSVs, private keys and keystore JSON, and refuses the push (exit 1, naming the file) if any turns up.
 
-CI runs the same scan on every push and pull request, but a red check only blocks a merge once it is required: under Settings → Branches → branch protection, require status checks `secrets` and `test` **and** "Require a pull request before merging" — required checks are only evaluated on pull requests, so without the second, pushes to the branch skip them. Hold `secrets` back until this branch has merged, because the job exists only here: a PR from a branch cut off `master` — the umask fix on `freebuff/wallet-test-umask`, say — can report `test` and nothing else, and would wait forever on a check it can never produce.
-
-None of that is in force yet: `master` reports `protected: false`, so nothing is required on it and a push lands unchallenged — the rule is a plan, not a state. Check rather than assume, with `GET /repos/{owner}/{repo}/branches`, which returns a `protected` flag per branch and needs no token on a public repo, unlike the protection endpoint itself, which needs admin credentials to read or change.
-
-Merge `freebuff/wallet-test-umask` first — two commits, and it makes `master`'s `test` job green on its own — and only add `secrets` to the required checks once this branch has merged, because until then that job exists nowhere on `master`.
-
-With both pull requests open, do it in this order:
-
-1. Merge `freebuff/wallet-test-umask` and let its `test` run finish green on `master`.
-2. Add the rule for `master`: "Require a pull request before merging" with 0 required approvals (GitHub will not let you approve your own PR), required check `test`, no bypass for administrators, no force pushes, no deletions.
-3. Merge `freebuff/dcb0e065826dc1aef46f74f5`. Its `secrets` job arrives with it and runs on that PR.
-4. Only then edit the same rule to require `secrets` next to `test`.
-
-**Check:** `GET /repos/{owner}/{repo}/branches` reports `protected: true` for `master`, and a fresh pull request shows both `test` and `secrets` in its merge box. A `protected` of `false` after step 2 means the rule was not saved, or was saved on another branch.
+CI runs the same scan on every push and pull request, but a required check only blocks a merge on a pull request: under Settings → Branches → branch protection, require `test` and "Require a pull request before merging", merge `freebuff/wallet-test-umask` first, and add `secrets` only once this branch has merged — that job exists only here, so a PR cut off `master` can report `test` alone and would wait on a check it can never produce. None of it is in force yet: `master` reports `protected: false`, and `GET /repos/{owner}/{repo}/branches` is how to check that flag rather than assume.
 
 `build/` is git-ignored, so **rebuild after every clone or dependency restore** — deploy and verification both read the artifact from there.
 
