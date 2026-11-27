@@ -397,7 +397,9 @@ check('and the flag accepts one', aclVerdict({ path: 's', user: 'suzig', entries
 
 const phraseDir = mkdtempSync(join(tmpdir(), 'wallet-phrase-file-'));
 const phraseFile = join(phraseDir, 'seed.txt');
-writeFileSync(phraseFile, `${VECTOR}\n`);
+// 0600 explicitly rather than whatever the umask grants: these cases test the
+// phrase, and a 0644 file would be refused before it was ever read.
+writeFileSync(phraseFile, `${VECTOR}\n`, { mode: 0o600 });
 run = await runWallet(['--restore', '--count', '1', '--phrase-file', phraseFile], '');
 check('--phrase-file restores without stdin', run.code === 0 && run.out.includes(EXPECTED_0), `exit ${run.code}: ${run.out}`);
 check('and prints nothing of the phrase itself', !run.out.includes(VECTOR), run.out);
@@ -452,6 +454,8 @@ if (process.platform === 'win32') {
   check('naming --phrase-only --out as the way to a 0600 file', /--phrase-only --out/.test(run.out), run.out.trim());
   run = await runWallet(['--restore', '--count', '1', '--phrase-file', phraseFile, '--allow-loose-permissions'], '');
   check('the flag reads it anyway', run.code === 0 && run.out.includes(EXPECTED_0), `exit ${run.code}: ${run.out}`);
+  // Put the mode back, so the cases below read the phrase instead of refusing it.
+  chmodSync(phraseFile, 0o600);
 
   // The same 0600 file, in a directory someone else can write to.
   const openDir = join(phraseDir, 'open');
