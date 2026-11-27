@@ -28,6 +28,15 @@ None of that is in force yet: `master` reports `protected: false`, so nothing is
 
 Merge `freebuff/wallet-test-umask` first — two commits, and it makes `master`'s `test` job green on its own — and only add `secrets` to the required checks once this branch has merged, because until then that job exists nowhere on `master`.
 
+With both pull requests open, do it in this order:
+
+1. Merge `freebuff/wallet-test-umask` and let its `test` run finish green on `master`.
+2. Add the rule for `master`: "Require a pull request before merging" with 0 required approvals (GitHub will not let you approve your own PR), required check `test`, no bypass for administrators, no force pushes, no deletions.
+3. Merge `freebuff/dcb0e065826dc1aef46f74f5`. Its `secrets` job arrives with it and runs on that PR.
+4. Only then edit the same rule to require `secrets` next to `test`.
+
+**Check:** `GET /repos/{owner}/{repo}/branches` reports `protected: true` for `master`, and a fresh pull request shows both `test` and `secrets` in its merge box. A `protected` of `false` after step 2 means the rule was not saved, or was saved on another branch.
+
 `build/` is git-ignored, so **rebuild after every clone or dependency restore** — deploy and verification both read the artifact from there.
 
 Encrypt the 10,004 keys at rest, before backing anything up:
