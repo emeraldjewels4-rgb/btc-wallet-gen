@@ -3,6 +3,10 @@
 // wallets, each a fresh secp256k1 key pair, plus the address-only list the
 // distribution script reads.
 //
+// --rehearsal writes a small throwaway set to wallets/rehearsal instead, so a
+// distribution run can be rehearsed on testnet without 10,004 transfers. Its
+// total deliberately does not account for the whole supply.
+//
 // Private keys are written only to files, never to stdout/terminal history.
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -11,18 +15,27 @@ import { fileURLToPath } from 'node:url';
 import { flag } from './env.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const outDir = resolve(root, flag('out', 'wallets'));
+const rehearsal = process.argv.includes('--rehearsal');
+const outDir = resolve(root, flag('out', rehearsal ? 'wallets/rehearsal' : 'wallets'));
 const force = process.argv.includes('--force');
 
 const token = JSON.parse(readFileSync(join(root, 'token.json'), 'utf8'));
-const { adminCount, adminAmount, holderCount, holderAmount } = token.allocation;
+const { adminAmount, holderAmount } = token.allocation;
+// A rehearsal set keeps the real per-wallet amounts and group sizes small.
+const adminCount = rehearsal ? 2 : token.allocation.adminCount;
+const holderCount = rehearsal ? 8 : token.allocation.holderCount;
 
-// The plan has to account for the entire supply, to the last token.
 const supply = BigInt(token.totalSupply);
 const planned =
   BigInt(adminAmount) * BigInt(adminCount) + BigInt(holderAmount) * BigInt(holderCount);
-if (planned !== supply) {
+// The real plan has to account for the entire supply, to the last token. A
+// rehearsal set only has to leave the rest of the supply in the treasury.
+if (!rehearsal && planned !== supply) {
   console.error(`allocation ${planned} does not add up to the ${supply} supply in token.json`);
+  process.exit(1);
+}
+if (rehearsal && planned >= supply) {
+  console.error(`rehearsal allocation ${planned} leaves nothing of the ${supply} supply`);
   process.exit(1);
 }
 
@@ -78,6 +91,7 @@ writeFileSync(
       decimals: token.decimals,
       chainId: token.chainId,
       totalSupply: token.totalSupply,
+      rehearsal,
       generatedAt: new Date().toISOString(),
       wallets: { admins: adminCount, holders: holderCount, unique: seen.size },
       allocation: {
@@ -126,7 +140,9 @@ if (
 console.log(`loveriver (${token.symbol}) — ${adminCount + holderCount} wallets in ${((Date.now() - started) / 1000).toFixed(1)}s`);
 console.log(`admins    ${adminCount} x ${adminAmount} = ${BigInt(adminAmount) * BigInt(adminCount)}`);
 console.log(`holders   ${holderCount} x ${holderAmount} = ${BigInt(holderAmount) * BigInt(holderCount)}`);
-console.log(`total     ${planned} / supply ${supply} tokens`);
+console.log(
+  `total     ${planned} / supply ${supply} tokens${rehearsal ? ' (rehearsal set, the rest stays in the treasury)' : ''}`,
+);
 console.log(`files (mode 0600, git-ignored): ${Object.values(files).map((f) => f.slice(root.length + 1)).join(', ')}`);
 console.log(`sample admin  ${admins[0].address}`);
 console.log(`sample holder ${holders[0].address}`);

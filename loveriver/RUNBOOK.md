@@ -24,13 +24,30 @@ npm run keystore -- encrypt
 
 Type the passphrase twice (12+ characters, no echo). It writes one Web3 Secret Storage V3 keystore per address to `wallets/keystores/`, reads them back, and proves the passphrase opens the first and last wallet of each group. About 40 minutes at the default scrypt cost; `--n 131072` is stronger and slower, `--n 32768` faster.
 
+The treasury key signs the deployment and then every transfer, so it is live for the whole distribution window — encrypt it too. This reads the plaintext key from `.env` and writes `wallets/treasury.keystore.json`:
+
+```bash
+npm run keystore -- encrypt-treasury
+```
+
+Then set `TREASURY_PRIVATE_KEY=wallets/treasury.keystore.json` in `.env` (or blank the line to use that path) and delete the plaintext key from it. Deploy and distribute prompt for the passphrase once per run and hold the key only in memory.
+
 ```bash
 cp -r wallets/keystores /media/encrypted-offline-backup/
+cp wallets/treasury.keystore.json /media/encrypted-offline-backup/
 cp wallets/holders.json wallets/summary.json /media/encrypted-offline-backup/
 chmod -R go-rwx /media/encrypted-offline-backup/keystores
 ```
 
 **Check:** `find wallets/keystores -name '*.json' | wc -l` → 10,004 (5 admins, 9,999 holders). Keep the passphrase somewhere separate from that backup: without it the keystores are unreadable, with it the backup is the wallet set.
+
+Before deleting the fallback, prove every keystore is the wallet its filename claims — `encrypt` only spot-checks the first and last of each group:
+
+```bash
+npm run keystore -- verify
+```
+
+**Check:** `verified: 10004 keystores …` and exit 0. It prompts once and costs about as long as `encrypt` (~40 minutes), because it really does open every file. A keystore that does not decrypt, or that holds another wallet's key, is listed by filename and the command exits 1 — fix those before anything is deleted.
 
 Once the backup opens, drop the plaintext CSVs — this only deletes them if every wallet has a keystore:
 
@@ -116,6 +133,34 @@ curl -s "https://api.etherscan.io/v2/api?chainid=97&module=contract&action=check
 
 ## 3. Rehearse distribution on testnet
 
+### 3a. Small set first — the whole path in seconds
+
+The real set is 10,004 transfers, too slow to repeat while you are still learning the script. Make a throwaway set of 2 admins + 8 holders in its own folder, with the real per-wallet amounts:
+
+```bash
+npm run wallets -- --rehearsal
+```
+
+**Check:** `10 wallets` and `total 58803988 / supply 69999999991 tokens (rehearsal set, the rest stays in the treasury)`.
+
+Then run that set through the exact same commands. `--rehearsal` is what lets a set that does not add up to the supply through; without it the script still refuses:
+
+```bash
+npm run distribute -- --chain bsc-testnet --wallets wallets/rehearsal --rehearsal          # dry run
+npm run distribute -- --chain bsc-testnet --wallets wallets/rehearsal --rehearsal --live
+npm run distribute -- --chain bsc-testnet --wallets wallets/rehearsal --rehearsal --live   # again
+```
+
+**Check:**
+- the dry run prints `mode rehearsal: this set pays 58803988000000000000000000 of …` and all 10 transfers, then `add --live to send.`
+- the live run gets the treasury key (one passphrase prompt), and ends `done: 10 transfers this run, 10/10 recipients paid`
+- the rerun prints `recipients 10 (10 already sent, 0 pending)` and ends `done: 0 transfers this run, 10/10 recipients paid`
+- `npm run audit -- --chain bsc-testnet --wallets wallets/rehearsal` → `paid 10/10`, `unpaid`/`short`/`overpaid`/`unreadable` all 0, treasury holds the 69,999,999,991 − 58,803,988 remainder, exit 0
+
+`--rehearsal` is refused with `--chain bsc`, so it can never be used on mainnet. The rehearsal set keeps its own state file in `wallets/rehearsal/`, so it does not touch the real run's progress. Delete `wallets/rehearsal/` once the real distribution is underway.
+
+### 3b. The real set, at real scale
+
 Admins are paid first, then holders in file order. Do the admin batch on its own so every later chunk is a clean 500 × 6,999,999:
 
 ```bash
@@ -126,12 +171,15 @@ npm run distribute -- --chain bsc-testnet --limit 50 --live
 ```
 
 **Check:**
-- `node -p 'Object.keys(require("./wallets/distribute-state.json").sent).length'` → 5, then 55
+- `node -e 'const fs=require("node:fs");const f=fs.readdirSync("wallets").find((n)=>n.startsWith("distribute-state.97-"));console.log(Object.keys(JSON.parse(fs.readFileSync("wallets/"+f)).sent).length)'` → 5, then 55
 - treasury token balance fell by exactly 7,009,990 after the admins, then 50 transfers moved 349,999,950
 - each new admin address holds 1,401,998 and each new holder 6,999,999 on the explorer
 - treasury still has BNB for gas
+- `npm run audit -- --chain bsc-testnet` reports `paid 55/10004` with `short`, `overpaid` and `unreadable` at 0 — the rest are unpaid because the rehearsal stops at 55, so it exits 1 by design
 
-`wallets/distribute-state.json` records each transfer right after it confirms. Keep it: rerunning the same command skips paid addresses and resumes at the next one.
+A full testnet run of all 10,004 wallets is optional — it costs ~0.05 tBNB and a couple of hours, and the small-set rehearsal above has already exercised the same code. If you want the real set on testnet too, drop `--wallets` and `--rehearsal` and run the same commands.
+
+`wallets/distribute-state.<chainId>-<token>.json` records each transfer right after it confirms. The scope is in the name, so the testnet rehearsal cannot make the mainnet run read as already paid; keep the file, and rerunning the same command skips paid addresses and resumes at the next one.
 
 ## 4. Fund mainnet gas
 
@@ -178,6 +226,14 @@ After each chunk of 500:
 Repeat until 10,004 recipients are paid, or drop `--limit` to run the remainder in one go — transfers are sequential and confirmed one at a time, so a full run takes a few hours.
 
 ## 8. Final state
+
+Confirm it from the chain rather than from the distribution run's own log:
+
+```bash
+npm run audit -- --chain bsc
+```
+
+**Check:** `paid 10004/10004`, `unpaid`, `short`, `overpaid` and `unreadable` all 0, treasury 0 base units, and a last line starting `confirmed:` with exit 0. Any wallet that does not match is printed by address and the command exits 1; `--batch 500` is the multicall size, `--token` and `--treasury` override the deployment record.
 
 - `totalSupply` = 69,999,999,991
 - Holders tab = 10,004 addresses

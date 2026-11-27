@@ -8,6 +8,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { flag, loadEnv } from './env.mjs';
+import { loadPrivateKey } from './treasury.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 loadEnv(root);
@@ -24,9 +25,17 @@ const live = process.argv.includes('--live');
 const token = JSON.parse(readFileSync(join(root, 'token.json'), 'utf8'));
 const artifact = JSON.parse(readFileSync(join(root, 'build', 'LoverRiver.json'), 'utf8'));
 
-const privateKey = process.env.DEPLOYER_PRIVATE_KEY ?? process.env.TREASURY_PRIVATE_KEY;
+let privateKey;
+try {
+  privateKey = await loadPrivateKey(root, process.env.DEPLOYER_PRIVATE_KEY ?? process.env.TREASURY_PRIVATE_KEY);
+} catch (error) {
+  console.error(`treasury key: ${error.message}`);
+  process.exit(1);
+}
 if (!privateKey && live) {
-  console.error('set TREASURY_PRIVATE_KEY (or DEPLOYER_PRIVATE_KEY) in loveriver/.env');
+  console.error(
+    'set TREASURY_PRIVATE_KEY (or DEPLOYER_PRIVATE_KEY) in loveriver/.env, or run: npm run keystore -- encrypt-treasury',
+  );
   process.exit(1);
 }
 
@@ -59,7 +68,9 @@ if (!live) {
 }
 
 if (!account) {
-  console.error('set TREASURY_PRIVATE_KEY (or DEPLOYER_PRIVATE_KEY) in loveriver/.env');
+  console.error(
+    'set TREASURY_PRIVATE_KEY (or DEPLOYER_PRIVATE_KEY) in loveriver/.env, or run: npm run keystore -- encrypt-treasury',
+  );
   process.exit(1);
 }
 

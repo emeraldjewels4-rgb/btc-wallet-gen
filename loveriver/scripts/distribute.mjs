@@ -1,17 +1,27 @@
 #!/usr/bin/env node
 // Sends each wallet its allocation from the treasury. Dry run unless --live.
 // Recipients are read from the encrypted keystores when they exist, otherwise
-// from the plaintext CSVs. Progress is written to wallets/distribute-state.json
-// so an interrupted run resumes where it stopped instead of sending twice.
-import { createPublicClient, createWalletClient, formatEther, getAddress, http, isAddress, parseUnits } from 'viem';
+// from the plaintext CSVs. Progress is written to one state file per chain and
+// token so an interrupted run resumes where it stopped instead of sending twice,
+// and a rehearsal on testnet cannot leave mainnet reading as already paid.
+//
+// --rehearsal allows a wallet set that does not account for the whole supply
+// (npm run wallets -- --rehearsal), so the whole path can be run end to end on
+// testnet in seconds. It is refused on mainnet: a partial set there would
+// strand the undistributed supply in the treasury.
+import { createPublicClient, createWalletClient, formatEther, http, isAddress } from 'viem';
 import { bsc, bscTestnet } from 'viem/chains';
 import { privateKeyToAccount } from 'viem/accounts';
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { flag, loadEnv } from './env.mjs';
+import { readRecipients, totalOf } from './recipients.mjs';
+import { retry } from './rpc.mjs';
+import { loadPrivateKey } from './treasury.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const shown = (path) => relative(root, path);
 loadEnv(root);
 
 const chains = { bsc, 'bsc-testnet': bscTestnet };
@@ -19,6 +29,14 @@ const chainName = flag('chain', 'bsc');
 const chain = chains[chainName];
 if (!chain) {
   console.error('--chain must be bsc or bsc-testnet');
+  process.exit(1);
+}
+
+const rehearsal = process.argv.includes('--rehearsal');
+if (rehearsal && chain.id === 56) {
+  console.error(
+    '--rehearsal is testnet-only: a wallet set that does not cover the supply has no place on mainnet',
+  );
   process.exit(1);
 }
 
@@ -33,54 +51,7 @@ if (limitFlag !== undefined && (!Number.isInteger(limit) || limit < 1)) {
 const token = JSON.parse(readFileSync(join(root, 'token.json'), 'utf8'));
 const artifact = JSON.parse(readFileSync(join(root, 'build', 'LoverRiver.json'), 'utf8'));
 const walletDir = resolve(root, flag('wallets', 'wallets'));
-const statePath = join(walletDir, 'distribute-state.json');
-const checksum = (value) => getAddress(`0x${String(value).replace(/^0x/, '')}`);
-
-// Keystores win when present; the CSVs fallback keeps a fresh key set working.
-// If both are there they have to list the same wallets, or a resume could pay
-// one set against the other's state.
-function readGroup(group) {
-  const csvPath = join(walletDir, `${group}.csv`);
-  const keystoreDir = join(walletDir, 'keystores', group);
-  const names = existsSync(keystoreDir)
-    ? readdirSync(keystoreDir).filter((name) => name.endsWith('.json')).sort()
-    : [];
-  const fromCsv = existsSync(csvPath)
-    ? readFileSync(csvPath, 'utf8')
-        .trim()
-        .split('\n')
-        .slice(1)
-        .map((line) => checksum(line.split(',')[1]))
-    : undefined;
-
-  if (names.length > 0) {
-    const fromKeystores = names.map((name) => {
-      const file = join(keystoreDir, name);
-      const keystore = JSON.parse(readFileSync(file, 'utf8'));
-      if (typeof keystore.address !== 'string') {
-        console.error(`${file} has no address; is it a keystore?`);
-        process.exit(1);
-      }
-      return checksum(keystore.address);
-    });
-    if (fromCsv) {
-      const known = new Set(fromCsv);
-      if (fromKeystores.length !== fromCsv.length || fromKeystores.some((address) => !known.has(address))) {
-        console.error(
-          `${group}: ${names.length} keystores and ${csvPath.slice(root.length + 1)} disagree; refusing to use either`,
-        );
-        process.exit(1);
-      }
-    }
-    return { addresses: fromKeystores, source: 'keystores' };
-  }
-
-  if (!fromCsv) {
-    console.error(`no ${group}.csv or keystores/${group}; run: npm run wallets`);
-    process.exit(1);
-  }
-  return { addresses: fromCsv, source: 'csv' };
-}
+const RECEIPT_TIMEOUT = 120_000;
 
 const tokenFlag = flag('token');
 const deploymentFile = join(root, 'deployments', `${chain.id}.json`);
@@ -92,37 +63,56 @@ if (tokenAddress && !isAddress(tokenAddress)) {
   process.exit(1);
 }
 
-const { adminAmount, holderAmount } = token.allocation;
-const unit = (amount) => parseUnits(String(amount), token.decimals);
-const admins = readGroup('admins');
-const holders = readGroup('holders');
-const recipients = [
-  ...admins.addresses.map((address) => ({ address, amount: unit(adminAmount), group: 'admin' })),
-  ...holders.addresses.map((address) => ({ address, amount: unit(holderAmount), group: 'holder' })),
-];
-if (new Set(recipients.map((recipient) => recipient.address)).size !== recipients.length) {
-  console.error('the recipient list repeats an address; refusing to continue');
-  process.exit(1);
-}
+// One state file per chain and token. The scope is written into the file too,
+// so a copied or renamed state file is refused instead of trusted.
+const scope = { chainId: chain.id, token: tokenAddress ? tokenAddress.toLowerCase() : 'no-token' };
+const statePath = join(walletDir, `distribute-state.${scope.chainId}-${scope.token}.json`);
+const saveState = () =>
+  writeFileSync(
+    statePath,
+    `${JSON.stringify({ chainId: scope.chainId, token: scope.token, sent: state.sent }, null, 2)}\n`,
+  );
 
+const { admins, holders, recipients } = readRecipients(walletDir, token, shown);
 const supply = BigInt(token.totalSupply) * 10n ** BigInt(token.decimals);
-const planned = recipients.reduce((sum, recipient) => sum + recipient.amount, 0n);
-if (planned !== supply) {
+const planned = totalOf(recipients);
+const remainder = supply - planned;
+if (remainder < 0n) {
+  console.error(`allocation ${planned} exceeds the ${supply} supply`);
+  process.exit(1);
+}
+if (remainder > 0n && !rehearsal) {
   console.error(`allocation ${planned} does not add up to the ${supply} supply`);
+  console.error('for a small test set on testnet, add --rehearsal (and npm run wallets -- --rehearsal)');
   process.exit(1);
 }
 
-const state = existsSync(statePath)
-  ? JSON.parse(readFileSync(statePath, 'utf8'))
-  : { sent: {} };
+function loadState() {
+  if (existsSync(join(walletDir, 'distribute-state.json'))) {
+    console.warn('note      ignoring wallets/distribute-state.json: progress is now keyed by chain and token');
+  }
+  if (!existsSync(statePath)) return { chainId: scope.chainId, token: scope.token, sent: {} };
+  const saved = JSON.parse(readFileSync(statePath, 'utf8'));
+  if (saved.chainId !== scope.chainId || saved.token !== scope.token) {
+    console.error(
+      `${shown(statePath)} is state for chain ${saved.chainId} / token ${saved.token}; refusing it`,
+    );
+    process.exit(1);
+  }
+  return { ...saved, sent: saved.sent ?? {} };
+}
+const state = loadState();
 const pending = recipients.filter((recipient) => !state.sent[recipient.address]);
 const batch = pending.slice(0, limit);
 
 console.log(`token     ${token.name} (${token.symbol}) at ${tokenAddress ?? '(not deployed yet)'}`);
 console.log(`chain     ${chain.name} (${chain.id})`);
-console.log(`wallets   ${walletDir.slice(root.length + 1)} (${admins.source === holders.source ? admins.source : `${admins.source} admins, ${holders.source} holders`})`);
+console.log(`wallets   ${shown(walletDir)} (${admins.source === holders.source ? admins.source : `${admins.source} admins, ${holders.source} holders`})`);
 console.log(`recipients ${recipients.length} (${recipients.length - pending.length} already sent, ${pending.length} pending)`);
 console.log(`total     ${planned} base units (${token.totalSupply} tokens)`);
+if (remainder > 0n) {
+  console.log(`mode      rehearsal: this set pays ${planned} of ${supply}, ${remainder} stays in the treasury`);
+}
 
 if (!live) {
   const toSend = batch;
@@ -140,9 +130,17 @@ if (!tokenAddress) {
   process.exit(1);
 }
 
-const privateKey = process.env.TREASURY_PRIVATE_KEY;
+let privateKey;
+try {
+  privateKey = await loadPrivateKey(root, process.env.TREASURY_PRIVATE_KEY);
+} catch (error) {
+  console.error(`treasury key: ${error.message}`);
+  process.exit(1);
+}
 if (!privateKey) {
-  console.error('set TREASURY_PRIVATE_KEY in loveriver/.env');
+  console.error(
+    'set TREASURY_PRIVATE_KEY in loveriver/.env, or run: npm run keystore -- encrypt-treasury',
+  );
   process.exit(1);
 }
 const account = privateKeyToAccount(privateKey);
@@ -150,56 +148,73 @@ const transport = http(process.env.BSC_RPC_URL || undefined);
 const publicClient = createPublicClient({ chain, transport });
 const walletClient = createWalletClient({ account, chain, transport });
 
-const chainId = await publicClient.getChainId();
+const chainId = await retry('chain id', () => publicClient.getChainId());
 if (chainId !== chain.id) {
   console.error(`RPC reports chain ${chainId}, expected ${chain.id}; refusing to sign`);
   process.exit(1);
 }
 
-const balance = await publicClient.readContract({
-  address: tokenAddress,
-  abi: artifact.abi,
-  functionName: 'balanceOf',
-  args: [account.address],
-});
+const balance = await retry('treasury token balance', () =>
+  publicClient.readContract({
+    address: tokenAddress,
+    abi: artifact.abi,
+    functionName: 'balanceOf',
+    args: [account.address],
+  }),
+);
 const outstanding = batch.reduce((sum, recipient) => sum + recipient.amount, 0n);
 if (balance < outstanding) {
   console.error(`treasury holds ${balance}, needs ${outstanding} for this run`);
   process.exit(1);
 }
-console.log(`treasury  ${account.address} (${balance} base units, ${formatEther(await publicClient.getBalance({ address: account.address }))} BNB for gas)\n`);
+const gasBalance = await retry('bnb balance', () => publicClient.getBalance({ address: account.address }));
+console.log(`treasury  ${account.address} (${balance} base units, ${formatEther(gasBalance)} BNB for gas)\n`);
 
 mkdirSync(walletDir, { recursive: true });
-let nonce = await publicClient.getTransactionCount({ address: account.address, blockTag: 'pending' });
+let nonce = await retry('nonce', () =>
+  publicClient.getTransactionCount({ address: account.address, blockTag: 'pending' }),
+);
 let sent = 0;
 
 for (const recipient of batch) {
   try {
-    const hash = await walletClient.writeContract({
-      address: tokenAddress,
-      abi: artifact.abi,
-      functionName: 'transfer',
-      args: [recipient.address, recipient.amount],
-      account,
-      chain,
-      nonce,
-    });
+    // Same nonce and same arguments on every attempt, so a retry can replace
+    // its own transaction but can never pay the recipient twice.
+    const hash = await retry(`send to ${recipient.address}`, () =>
+      walletClient.writeContract({
+        address: tokenAddress,
+        abi: artifact.abi,
+        functionName: 'transfer',
+        args: [recipient.address, recipient.amount],
+        account,
+        chain,
+        nonce,
+      }),
+    );
     nonce += 1;
-    await publicClient.waitForTransactionReceipt({ hash });
+    const receipt = await retry(`confirm ${hash}`, () =>
+      publicClient.waitForTransactionReceipt({ hash, timeout: RECEIPT_TIMEOUT }),
+    );
+    if (receipt.status !== 'success') {
+      saveState();
+      console.error(`${recipient.address}: transfer ${hash} reverted; not recorded as sent`);
+      console.error(`progress saved in ${shown(statePath)}; rerun --live to resume`);
+      process.exit(1);
+    }
     state.sent[recipient.address] = hash;
-    // Recorded after every transfer: a crash mid-chunk must not pay twice.
-    writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
+    // Recorded after every confirmed transfer: a crash mid-chunk must not pay twice.
+    saveState();
     sent += 1;
     if (sent % 25 === 0 || sent === batch.length) {
       console.log(`${sent} sent, last ${hash}`);
     }
   } catch (error) {
-    writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
-    console.error(`stopped after ${sent} transfers: ${error.shortMessage ?? error.message}`);
-    console.error(`progress saved in wallets/distribute-state.json; rerun --live to resume`);
+    saveState();
+    console.error(`stopped at ${recipient.address} after ${sent} transfers: ${error.shortMessage ?? error.message}`);
+    console.error(`progress saved in ${shown(statePath)}; rerun --live to resume`);
     process.exit(1);
   }
 }
 
-writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
+saveState();
 console.log(`\ndone: ${sent} transfers this run, ${Object.keys(state.sent).length}/${recipients.length} recipients paid`);

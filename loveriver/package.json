@@ -11,7 +11,8 @@
     "keystore": "node scripts/keystore.mjs",
     "verify:input": "node scripts/verify-input.mjs",
     "deploy": "node scripts/deploy.mjs",
-    "distribute": "node scripts/distribute.mjs"
+    "distribute": "node scripts/distribute.mjs",
+    "audit": "node scripts/audit.mjs"
   },
   "dependencies": {
     "viem": "^2.57.17"

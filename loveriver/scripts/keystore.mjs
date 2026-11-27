@@ -3,6 +3,8 @@
 //
 //   encrypt            wallets/admins.csv + wallets/holders.csv
 //                      -> wallets/keystores/{admins,holders}/<address>.json
+//   encrypt-treasury   TREASURY_PRIVATE_KEY -> wallets/treasury.keystore.json
+//   verify             open every keystore and match it to its filename
 //   decrypt            one keystore -> one key file, for spending that wallet
 //   remove-plaintext   delete the CSVs once every address has a keystore
 //
@@ -10,11 +12,11 @@
 // and ethers read. Private keys are only ever written to files, never printed.
 import { createCipheriv, createDecipheriv, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getAddress, keccak256 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { flag } from './env.mjs';
+import { flag, loadEnv } from './env.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const command = process.argv[2];
@@ -146,8 +148,8 @@ function readSecret(label) {
   });
 }
 
-async function askPassphrase(confirm) {
-  const password = await readSecret('passphrase: ');
+export async function askPassphrase(confirm, label = 'passphrase: ') {
+  const password = await readSecret(label);
   if (password.length < MIN_PASSPHRASE) {
     throw new Error(`passphrase must be at least ${MIN_PASSPHRASE} characters`);
   }
@@ -234,6 +236,131 @@ async function encrypt() {
   console.log('then run: npm run keystore -- remove-plaintext');
 }
 
+// encrypt only proves the passphrase opens the first and last wallet of each
+// group, and remove-plaintext then deletes the CSV fallback. This opens every
+// file instead: a keystore has to decrypt with the passphrase and yield the
+// address its filename claims, or that wallet is lost the moment the CSVs go.
+async function verify() {
+  const total = groups.reduce((sum, group) => sum + keystoreFiles(group).length, 0);
+  if (total === 0) {
+    console.error(`no keystores under ${relative(root, join(walletDir, 'keystores'))}; run: npm run keystore -- encrypt`);
+    process.exit(1);
+  }
+
+  const password = await askPassphrase(false);
+
+  // Fail fast on the usual cause: one wrong passphrase fails every file, and
+  // walking 10,004 scrypt derivations to say so would take the better part of
+  // an hour. This cannot tell a wrong passphrase from a damaged first file, so
+  // the message says both.
+  const first = groups.flatMap((group) => keystoreFiles(group).map((name) => join(walletDir, 'keystores', group, name)))[0];
+  try {
+    decryptKey(JSON.parse(readFileSync(first, 'utf8')), password);
+  } catch (error) {
+    console.error(`${relative(root, first)}: ${error.message}`);
+    console.error('wrong passphrase, or that one file is damaged; nothing else was checked.');
+    process.exit(1);
+  }
+
+  const started = Date.now();
+  const problems = [];
+  let checked = 0;
+
+  for (const group of groups) {
+    for (const name of keystoreFiles(group)) {
+      const file = join(walletDir, 'keystores', group, name);
+      const label = `${group}/${name}`;
+      let keystore;
+      try {
+        keystore = JSON.parse(readFileSync(file, 'utf8'));
+      } catch (error) {
+        problems.push(`${label}: not readable as JSON (${error.message})`);
+        continue;
+      }
+
+      let address;
+      try {
+        address = privateKeyToAccount(decryptKey(keystore, password)).address;
+      } catch (error) {
+        problems.push(
+          /wrong passphrase/.test(error.message)
+            ? `${label}: does not decrypt with this passphrase (damaged, or encrypted with another one)`
+            : `${label}: ${error.message}`,
+        );
+        continue;
+      }
+
+      // The filename is what decrypt and distribution look the wallet up by.
+      const expectedName = `${address.slice(2).toLowerCase()}.json`;
+      if (name !== expectedName) {
+        problems.push(`${label}: holds the key for ${address}, but is named for ${name.replace(/\.json$/, '')}`);
+      }
+      if (typeof keystore.address === 'string' && checksum(keystore.address) !== address) {
+        problems.push(`${label}: holds the key for ${address}, but records ${keystore.address}`);
+      }
+
+      checked += 1;
+      if (checked % 500 === 0 || checked === total) {
+        const seconds = (Date.now() - started) / 1000;
+        console.log(`${checked}/${total} verified (${seconds.toFixed(0)}s, ${(checked / seconds).toFixed(1)}/s)`);
+      }
+    }
+  }
+
+  const seconds = (Date.now() - started) / 1000;
+  if (problems.length > 0) {
+    for (const problem of problems.slice(0, 20)) console.error(`  ${problem}`);
+    if (problems.length > 20) console.error(`  ... ${problems.length - 20} more`);
+    console.error(`\nverify failed: ${problems.length} problem(s) in ${total} keystores under ${relative(root, walletDir)}`);
+    console.error('do not delete the CSVs while a wallet has no valid keystore.');
+    process.exit(1);
+  }
+
+  console.log(
+    `\nverified: ${total} keystores under ${relative(root, walletDir)} each decrypt to the address in their filename (${seconds.toFixed(0)}s)`,
+  );
+  console.log('the plaintext CSVs are no longer needed; keep the passphrase and an offline copy.');
+}
+
+async function encryptTreasury() {
+  loadEnv(root);
+  const value = (process.env.TREASURY_PRIVATE_KEY ?? '').trim();
+  if (!value) {
+    console.error('set TREASURY_PRIVATE_KEY in .env to the plaintext 0x... key first');
+    process.exit(1);
+  }
+  if (!/^0x[0-9a-fA-F]{64}$/.test(value)) {
+    console.error('TREASURY_PRIVATE_KEY is not a 0x... private key; it may already be a keystore');
+    process.exit(1);
+  }
+
+  const file = join(walletDir, 'treasury.keystore.json');
+  if (existsSync(file) && !process.argv.includes('--force')) {
+    console.error(`${relative(root, file)} already exists; pass --force to replace it`);
+    process.exit(1);
+  }
+
+  const cost = scryptCost();
+  const password = await askPassphrase(true);
+  const address = privateKeyToAccount(value).address;
+  mkdirSync(walletDir, { recursive: true });
+  writeFileSync(file, `${JSON.stringify(encryptKey(value, password, cost), null, 2)}\n`, { mode: 0o600 });
+
+  const keystore = JSON.parse(readFileSync(file, 'utf8'));
+  if (privateKeyToAccount(decryptKey(keystore, password)).address !== address) {
+    console.error(`${relative(root, file)} does not decrypt back to ${address}`);
+    process.exit(1);
+  }
+
+  console.log(
+    `\ntreasury keystore for ${address} written to ${relative(root, file)} (scrypt N=${cost}, mode 0600, git-ignored)`,
+  );
+  console.log('back it up with the wallet keystores, and keep the passphrase off the machine.');
+  console.log('then in .env set: TREASURY_PRIVATE_KEY=wallets/treasury.keystore.json');
+  console.log('(or blank the line to use that default path) and delete the plaintext key.');
+  console.log('deploy and distribute prompt for the passphrase once per run.');
+}
+
 async function decrypt() {
   const addressFlag = flag('address');
   if (!addressFlag) {
@@ -290,10 +417,14 @@ function removePlaintext() {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     if (command === 'encrypt') await encrypt();
+    else if (command === 'encrypt-treasury') await encryptTreasury();
+    else if (command === 'verify') await verify();
     else if (command === 'decrypt') await decrypt();
     else if (command === 'remove-plaintext') removePlaintext();
     else {
-      console.error('usage: npm run keystore -- encrypt | decrypt --address 0x... | remove-plaintext');
+      console.error(
+        'usage: npm run keystore -- encrypt | encrypt-treasury | verify | decrypt --address 0x... | remove-plaintext',
+      );
       process.exit(1);
     }
   } catch (error) {
